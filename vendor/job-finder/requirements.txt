@@ -1,0 +1,14 @@
+anthropic
+openai
+langchain-anthropic
+browser-use
+playwright
+playwright-stealth
+python-docx
+reportlab
+openpyxl
+python-dotenv
+aiofiles
+pyyaml
+pytest
+pytest-asyncio

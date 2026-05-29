@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+*.egg
+build/
+dist/
+
+# Venvs
+.venv/
+venv/
+.python-version
+
+# pytest / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Mypy / ruff
+.mypy_cache/
+.ruff_cache/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# App runtime
+dev-data/runtime/
+dev-data/logs/
+dev-data/dryrun-screenshots/
+dev-data/sessions/
+dev-data/output/
+dev-data/jobs.db*
+dev-data/errors/
+
+# Build artefacts
+*.app/
+*.dmg
+*.pkg
+*.msi
+*.exe
+*.zip
+*.tar.gz
+release/

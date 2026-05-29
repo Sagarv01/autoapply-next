@@ -1,0 +1,217 @@
+# Paste full resume text here
+SAGAR VERMA
+Sydney, Australia | Open to opportunities across Australia
+Email: sagarvd130@gmail.com
+Phone: +61 491 621 148
+
+PROFESSIONAL SUMMARY
+AWS-certified DevOps and Cloud Engineer with 5+ years of hands-on experience designing, building, automating, and operating cloud infrastructure in production environments. Strong background in AWS, Linux administration, Infrastructure as Code, CI/CD, monitoring, incident response, cost optimisation, and containerised workloads. Experience supporting 200+ Linux servers across 15+ AWS accounts with 99.9% uptime. Proven success in building fault-tolerant architectures, reducing deployment effort through automation, improving reliability through monitoring and alerting, and lowering infrastructure costs through rightsizing and storage optimisation.
+
+Also brings hands-on experience delivering Amazon Connect and Amazon Lex solutions, including contact centre and conversational AI implementations for large-scale international use cases. Comfortable working across cloud operations, DevOps engineering, platform support, infrastructure automation, and customer-facing solution delivery. Strong communicator with experience collaborating with stakeholders, clients, delivery teams, and leadership.
+
+Currently extending cloud engineering experience into applied AI and LLM integration work. Building production-style Python services that combine the Anthropic Claude API (Sonnet for generation, Haiku for low-latency validation) with the OpenAI API (gpt-4o-mini for classification and scoring) to solve real business-process automation problems, including document validation, structured content generation, classification, and workflow orchestration. Hands-on with the Anthropic and OpenAI Python SDKs, async API patterns, prompt engineering with structured JSON output, multi-provider model routing, retry and error handling, and integration of LLMs into end-to-end automation pipelines. Also working with PDF text extraction (pdfplumber) as part of document-ingestion pipelines.
+
+TARGET ROLES
+DevOps Engineer
+AWS Engineer
+Cloud Engineer
+Cloud DevOps Engineer
+Platform Engineer
+Site Reliability Engineer
+Infrastructure Engineer
+Systems Engineer
+Cloud Support Engineer
+AWS Cloud Consultant
+Amazon Connect Engineer
+Amazon Connect Delivery Engineer
+Conversational AI Engineer
+Cloud Operations Engineer
+AI Engineer
+AI Integration Engineer
+LLM Engineer
+Applied AI Engineer
+AI Automation Engineer
+AI Platform Engineer
+
+CORE SKILLS
+AWS, Amazon Web Services, Cloud Infrastructure, DevOps, Linux Administration, Ubuntu, CentOS, Windows Server Administration (occasional support), Infrastructure as Code, Terraform, CloudFormation, Ansible (familiar), Configuration Management, CI/CD, AWS CodePipeline, GitHub Actions, Jenkins, Docker, Kubernetes, AWS ECS, AWS EKS, AWS Fargate, Container Orchestration, Monitoring, Observability, CloudWatch, Prometheus (familiar), Grafana (familiar), ELK Stack (familiar), Elasticsearch (familiar), Logstash (familiar), Kibana (familiar), Incident Response, On-Call Support, Production Support, Troubleshooting, Cost Optimisation, FinOps, AWS Security, IAM, KMS, Secrets Manager, CloudTrail, GuardDuty, AWS Config, Security Hub, Security Compliance, Networking, VPC, Subnets, NAT Gateway, Internet Gateway, Security Groups, Load Balancers, ALB, NLB, API Gateway, Auto Scaling, Route 53, EC2, EBS, S3, RDS, RDS PostgreSQL, RDS MySQL, Amazon Aurora, DynamoDB, ElastiCache, Redis, Lambda, EFS, CloudFront, SNS, SQS, Messaging Queues, Amazon Connect, Amazon Lex, Amazon Lex v2, Kinesis Data Streams, Conversational AI, Chatbots, IVR, Contact Centre Technology, Microsoft Azure (basic exposure), Google Cloud Platform (basic exposure), GCP, Python, Bash, PowerShell (familiar), C, pytest, Type Hints, GitHub, Bitbucket, Git, Postman, curl, REST APIs, Markdown, Agile, Scrum, Kanban, Jira, Documentation, Runbooks, Stakeholder Management, Anthropic Claude API, Claude Sonnet, Claude Haiku, OpenAI API, GPT-4o-mini, LLM Integration, LLM Orchestration, Prompt Engineering, Prompt Caching, Structured JSON Output, AI Automation, Multi-Provider LLM Integration, Model Routing, Agentic Workflows, Multi-Step Agents, Failure Recovery, pdfplumber, PDF Document Parsing, FastAPI, SQLAlchemy, PostgreSQL, Async Python, Playwright, Browser Automation, Persistent Browser Sessions, SaaS Backend Development
+
+PROFESSIONAL EXPERIENCE
+
+Perimattic
+DevOps Engineer / AWS Engineer / Cloud Engineer
+Jul 2019 - Feb 2025
+
+Worked in a consulting and delivery environment supporting production AWS infrastructure, cloud operations, DevOps automation, and customer solutions for international clients.
+
+Key achievements and responsibilities:
+- Maintained 99.9% uptime across 200+ Linux servers running Ubuntu and CentOS in 15+ AWS accounts supporting customer-facing production systems.
+- Designed and supported fault-tolerant, highly available AWS environments using EC2, EBS, EFS, S3, RDS (PostgreSQL, MySQL, and Aurora), DynamoDB, ElastiCache for Redis, Lambda, IAM, Route 53, ALB, NLB, API Gateway, Auto Scaling, SNS, SQS, CloudFront, and CloudWatch across VPC-based networking with NAT Gateways and Internet Gateways.
+- Delivered containerised workloads on AWS ECS, AWS EKS (managed Kubernetes), and AWS Fargate in production, covering deployment manifests, service definitions, auto-scaling, and troubleshooting across multi-environment setups.
+- Built and operated automated CI/CD pipelines using AWS CodePipeline and GitHub Actions, reducing manual deployment effort by approximately 70% and improving delivery speed and consistency.
+- Drove Infrastructure as Code adoption using Terraform and CloudFormation to enable repeatable, auditable, and reliable infrastructure deployments across multiple environments and accounts.
+- Led migration of legacy infrastructure to cloud-based and cloud-native AWS solutions, resulting in improved scalability and an approximate 30% reduction in operational overhead.
+- Reduced infrastructure costs by approximately US$4,000 per month through S3 analysis, lifecycle improvements, server consolidation, rightsizing, and more efficient infrastructure usage.
+- Implemented monitoring, alerting, and operational visibility using AWS CloudWatch, reducing downtime by around 20% and improving issue detection and response.
+- Supported incident response, production troubleshooting, operational stability, and service reliability across business-critical systems.
+- Worked with containerised workloads using Docker, AWS ECS, and Kubernetes to support deployment and orchestration of applications.
+- Applied AWS security best practices across production workloads, including IAM role and policy design, KMS for encryption at rest, Secrets Manager for application credentials, CloudTrail for audit logging, GuardDuty for threat detection, AWS Config for compliance posture, Security Hub for centralised findings, and security-group and VPC hardening.
+- Created technical documentation, operational procedures, deployment notes, and support runbooks for smoother team operations and handovers.
+- Collaborated with developers, project teams, and stakeholders to improve release processes, infrastructure stability, and overall platform performance.
+
+Amazon Connect / Conversational AI delivery experience within Perimattic:
+- Contributed to the design and deployment of a production Amazon Connect contact centre solution serving 20+ airports across 4+ countries.
+- Worked with Amazon Connect, Amazon Lex v2, Lambda, and DynamoDB to build contact flows, routing, and Lex-driven conversational AI, and consumed Amazon Connect's Kinesis-based Contact Trace Record (CTR) and Agent Event streams for reporting and operational analytics.
+- Designed or supported intelligent routing, escalation-to-agent flows, and contact centre workflows to improve customer experience and agent handoff effectiveness.
+- Helped optimise bot journeys, fallback handling, and user interaction flows through analysis of conversation logs and user behaviour.
+- Supported cross-functional delivery across technical teams and client-facing environments in an Agile setup using Scrum/Kanban and Jira.
+
+Independent / Applied AI Engineering
+Applied AI Engineer (Solo, Full-Time)
+Feb 2025 - Present (current; full-time focus)
+
+Full-time independent applied-AI engineering role following Perimattic. Focus is pragmatic production engineering rather than research: shipping working systems, measuring reliability, controlling cost, and iterating. This role fills the period from Feb 2025 to today and represents continuous, full-time output across cloud engineering, Python services, and applied LLM integration.
+
+Key work:
+- Built end-to-end Python automation platforms using the Anthropic Claude API (Claude Sonnet for generation, Claude Haiku for low-latency validation) combined with the OpenAI API (gpt-4o-mini for classification and scoring). Systems ingest structured inputs, generate and validate tailored documents via Claude, and drive downstream workflows autonomously.
+- Designed multi-step agentic workflows with bounded retries, recovery strategies, cumulative-failure tracking, and per-attempt structured logging so that long-running autonomous loops are debuggable and cost-controlled.
+- Implemented Anthropic prompt caching (cache_control: ephemeral) on system and profile blocks to drive ~90% input-cost reduction on cached tokens for sustained-throughput LLM workloads.
+- Implemented a FastAPI backend for a SaaS-shaped service, with async SQLAlchemy against PostgreSQL, S3 for document storage, OAuth for identity, and a Stripe-ready billing surface. Used Claude Haiku for inbound document validation to gate low-quality inputs before expensive downstream processing.
+- Built production browser automation in Playwright with persistent Chrome user-data-dirs, anti-detection flags (--disable-blink-features=AutomationControlled), session reuse, and form-field automation across complex multi-step web workflows.
+- Applied prompt engineering, structured JSON output (with parser repair and grading-style self-checks), multi-provider model routing across Sonnet/Haiku/gpt-4o-mini to balance latency, quality, and cost.
+- Maintained typed Python codebases with pytest test suites, GitHub Actions CI with automated tests and linting, environment-based configuration, secrets handling, and SQLite/PostgreSQL persistence layers.
+- Delivered end to end as a solo engineer: design, implementation, debugging, deployment setup, observability, cost monitoring, and iterative improvement based on production feedback.
+
+Relevance: combines cloud engineering, Python, async systems, data persistence, applied LLM integration, and production browser automation to solve practical business-process automation problems end-to-end.
+
+ActivateUTS
+Student Board Director
+Oct 2023 - Present
+
+- Serve in a leadership and governance role for a non-profit organisation supporting the student experience at UTS.
+- Contribute to planning, oversight, and stakeholder collaboration across a large ecosystem of student clubs, societies, events, and campus services.
+- Support governance, strategic decision-making, and cross-functional coordination across technology and operational initiatives.
+
+EDUCATION
+
+University of Technology Sydney
+Master of Information Technology
+Major: Internetworking
+2023 - 2025
+Sydney, Australia
+
+GLA University
+Bachelor of Technology
+Major: Computer Science Engineering
+2015 - 2019
+India
+
+CERTIFICATIONS
+- AWS Certified Cloud Practitioner
+- AWS Certified Solutions Architect – Associate
+
+TECHNICAL SKILLS
+
+Cloud Platforms and AWS Services (production experience):
+- Compute: EC2, Lambda, ECS, EKS (managed Kubernetes), Fargate
+- Storage: S3, EBS, EFS
+- Databases: RDS (PostgreSQL, MySQL, Aurora), DynamoDB, ElastiCache for Redis
+- Networking: VPC, subnets, NAT Gateway, Internet Gateway, Route 53, ALB, NLB, API Gateway, Security Groups, Auto Scaling
+- Messaging: SNS, SQS
+- Security and Identity: IAM, KMS, Secrets Manager, CloudTrail, GuardDuty, AWS Config, Security Hub
+- Observability: CloudWatch (logs, metrics, alarms)
+- Content Delivery: CloudFront
+- Contact Centre: Amazon Connect (instance, contact flows, routing profiles, queues), Amazon Lex v2, Kinesis streams from Connect (CTR and Agent Events)
+
+Cloud Platforms and AWS Services (familiar with, not primary production focus):
+- AWS CDK
+- AWS SAM
+- AWS Backup
+- SSM Parameter Store
+- Kinesis Data Streams and Firehose (outside of Connect usage)
+- WAF and Shield
+
+Infrastructure and DevOps:
+- Terraform
+- CloudFormation
+- Infrastructure as Code
+- CI/CD
+- AWS CodePipeline
+- GitHub Actions
+- Jenkins
+- Docker
+- Kubernetes
+- AWS ECS
+
+Operating Systems and Administration:
+- Linux
+- Ubuntu
+- CentOS
+- Apache
+- Nginx
+
+Monitoring, Logging, and Operations:
+- CloudWatch
+- Prometheus (familiar)
+- Grafana (familiar)
+- ELK Stack — Elasticsearch, Logstash, Kibana (familiar)
+- Incident Response
+- Production Support
+- Troubleshooting
+- Monitoring and Alerting
+- On-call support
+- Root Cause Analysis
+
+Programming and Scripting:
+- Python (Lambda functions in production at Perimattic; async services and CLIs in independent projects)
+- Bash
+- C
+- Type hints in Python (selectively, and inherited via typed SDKs)
+
+Version Control and Dev Workflow:
+- GitHub (primary), GitHub Actions for CI
+- Bitbucket (exposure on client environments)
+- Git: feature branches, pull-request workflow, pre-production branch patterns on independent projects
+- Markdown for READMEs, runbooks, and internal documentation
+
+Testing and API Tooling:
+- pytest in independent Python projects (including AI-assisted test generation and maintenance)
+- Postman and curl for API testing and debugging
+
+Applied AI and LLM Integration:
+- Anthropic Claude API: claude-sonnet-4-6 for generation, claude-haiku-4-5 for low-latency validation and lightweight reasoning
+- OpenAI API: gpt-4o-mini for classification and scoring tasks
+- Anthropic and OpenAI Python SDKs, async client patterns
+- Multi-provider model routing: using different providers and model tiers for different tasks to balance latency, quality, and cost
+- Prompt engineering and structured JSON output (rule-constrained prompts, post-processing, validation, retries)
+- Retry and error handling for LLM calls, including JSON parse fallback
+- Document ingestion and parsing: pdfplumber for PDF text extraction as input to LLM pipelines
+- Integration of LLMs into end-to-end automation pipelines alongside browser automation (Playwright) and persistence layers (SQLite, PostgreSQL)
+- FastAPI backends with async SQLAlchemy, PostgreSQL, S3, OAuth for AI-backed services
+
+Delivery and Collaboration:
+- Agile
+- Scrum
+- Kanban
+- Jira
+- Documentation
+- Runbooks
+- Stakeholder Management
+- Cross-functional Collaboration
+
+ADDITIONAL STRENGTHS
+- Strong experience in AWS production environments
+- Experience working across multiple AWS accounts and enterprise-style setups
+- Strong focus on reliability, automation, scalability, and operational excellence
+- Experience balancing engineering delivery with cost optimisation and cloud governance
+- Able to work across infrastructure, deployment automation, monitoring, and client-facing cloud solution delivery
+
+INTERESTS
+Swimming
+Working Out
+Tennis
+
+===== INTERNAL NOTES (context only, do NOT include in generated resumes, cover letters, or skills lines) =====
+The content below this marker is background context for the candidate's understanding only. The resume tailoring pipeline MUST NOT surface anything below this line in any generated output (summary, bullets, skills, experience headline, cover letter, or anywhere else). Do not list these items as skills or claim this experience in generated documents.
+
+Microsoft Azure exposure: 5-month Perimattic engagement in 2023 (Feb to July) using Microsoft Bot Framework Composer for visual dialog authoring. The candidate considers this light exposure only and does not want it represented on applications.

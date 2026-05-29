@@ -1,0 +1,437 @@
+# Tag-triggered release workflow: builds AutoApply Next on macOS arm64 and Windows x64, signs + notarizes when secrets are present, ships unsigned "DEV BUILD" artefacts when they are not, then publishes a tufup update payload and GitHub Release.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.1.0). Used for manual test builds.'
+        required: true
+        default: 'v0.0.0-dev'
+
+# Workflow-level note on secrets:
+#
+# This workflow is designed to "fail open" on missing credentials. If any of
+# the signing / notarization / tufup secrets are not configured (e.g. a fork,
+# or before the user has provisioned certs), the relevant step prints a
+# "MISSING_CERTS:" line, exits 0, and the resulting artefact is uploaded with
+# a "-DEV-BUILD" suffix in its filename so downstream users do not mistake it
+# for a release. See packaging/CERT_CHECKLIST.md for the full secret list.
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # macOS build (Apple Silicon)
+  # ---------------------------------------------------------------------------
+  macos-build:
+    name: Build macOS (arm64)
+    runs-on: macos-14
+    timeout-minutes: 60
+    outputs:
+      artefact_name: ${{ steps.name.outputs.artefact_name }}
+      is_dev_build: ${{ steps.sign.outputs.is_dev_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run contract tests
+        shell: bash
+        run: pytest tests/contract -ra
+
+      - name: Build with PyInstaller
+        shell: bash
+        run: |
+          pyinstaller packaging/pyinstaller.spec --noconfirm
+          ls -la dist/
+
+      - name: Import Developer ID certificate into keychain
+        if: ${{ secrets.APPLE_DEV_ID_CERT_P12 != '' }}
+        shell: bash
+        env:
+          APPLE_DEV_ID_CERT_P12: ${{ secrets.APPLE_DEV_ID_CERT_P12 }}
+          APPLE_DEV_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEV_ID_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_DEV_ID_CERT_P12:-}" ]]; then
+            echo "MISSING_CERTS: APPLE_DEV_ID_CERT_P12 not set, skipping keychain import"
+            exit 0
+          fi
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 16)
+          CERT_PATH="$RUNNER_TEMP/cert.p12"
+          echo "$APPLE_DEV_ID_CERT_P12" | base64 -d > "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "${APPLE_DEV_ID_CERT_PASSWORD:-}" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" || true
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed s/\"//g)
+          rm -f "$CERT_PATH"
+
+      - name: Sign and notarize
+        id: sign
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_DEV_ID_SIGNING_IDENTITY: ${{ secrets.APPLE_DEV_ID_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          chmod +x packaging/macos/sign-notarize.sh
+          APP_PATH="dist/AutoApply Next.app"
+          if [[ ! -d "$APP_PATH" ]]; then
+            echo "ERROR: built bundle missing at $APP_PATH"
+            ls -la dist/
+            exit 1
+          fi
+
+          # Capture script output so we can detect the MISSING_CERTS path.
+          set +e
+          OUTPUT=$(./packaging/macos/sign-notarize.sh "$APP_PATH" 2>&1)
+          EXIT_CODE=$?
+          set -e
+          echo "$OUTPUT"
+
+          if [[ $EXIT_CODE -ne 0 ]]; then
+            echo "sign-notarize.sh failed with exit $EXIT_CODE"
+            exit $EXIT_CODE
+          fi
+
+          if echo "$OUTPUT" | grep -q "^MISSING_CERTS:"; then
+            echo "is_dev_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_dev_build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute artefact filename
+        id: name
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          IS_DEV: ${{ steps.sign.outputs.is_dev_build }}
+        run: |
+          if [[ "$IS_DEV" == "true" ]]; then
+            NAME="AutoApplyNext-${TAG}-macos-arm64-DEV-BUILD.zip"
+            cp "dist/AutoApply Next-unsigned.zip" "dist/${NAME}"
+          else
+            NAME="AutoApplyNext-${TAG}-macos-arm64.zip"
+            cp "dist/AutoApply Next.zip" "dist/${NAME}"
+          fi
+          echo "artefact_name=${NAME}" >> "$GITHUB_OUTPUT"
+          ls -la dist/
+
+      - name: Build tufup payload
+        shell: bash
+        env:
+          TUFUP_TARGETS_KEY: ${{ secrets.TUFUP_TARGETS_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TUFUP_TARGETS_KEY:-}" ]]; then
+            echo "MISSING_CERTS: TUFUP_TARGETS_KEY"
+            echo "Skipping tufup payload build. The platform binary will still be"
+            echo "uploaded to the GitHub Release but no update metadata is generated."
+            exit 0
+          fi
+          # Placeholder: real key material would be written to a temp file and
+          # passed to `python -m tufup targets add ...`. The user must set up
+          # the tufup repository layout (metadata/, targets/) before this works.
+          # See packaging/CERT_CHECKLIST.md "tufup" section.
+          echo "TODO: invoke python -m tufup with the platform binary"
+          echo "Expected layout: tufup-repo/metadata, tufup-repo/targets"
+
+      - name: Upload macOS artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.artefact_name }}
+          path: dist/${{ steps.name.outputs.artefact_name }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Windows build (x64)
+  # ---------------------------------------------------------------------------
+  windows-build:
+    name: Build Windows (x64)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      artefact_name: ${{ steps.name.outputs.artefact_name }}
+      is_dev_build: ${{ steps.sign.outputs.is_dev_build }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: tag
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          GH_REF: ${{ github.ref }}
+        run: |
+          if ($env:EVENT_NAME -eq "workflow_dispatch") {
+            "tag=$($env:INPUT_TAG)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            $tag = $env:GH_REF -replace '^refs/tags/', ''
+            "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run contract tests
+        shell: pwsh
+        run: pytest tests/contract -ra
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller packaging/pyinstaller.spec --noconfirm
+          Get-ChildItem dist
+
+      - name: Import code-signing certificate
+        if: ${{ secrets.WIN_SIGNING_CERT_PFX != '' }}
+        shell: pwsh
+        env:
+          WIN_SIGNING_CERT_PFX: ${{ secrets.WIN_SIGNING_CERT_PFX }}
+          WIN_SIGNING_CERT_PASSWORD: ${{ secrets.WIN_SIGNING_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WIN_SIGNING_CERT_PFX) {
+              Write-Host "MISSING_CERTS: WIN_SIGNING_CERT_PFX not set, skipping cert import"
+              exit 0
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WIN_SIGNING_CERT_PFX))
+          $pwdSource = if ($env:WIN_SIGNING_CERT_PASSWORD) { $env:WIN_SIGNING_CERT_PASSWORD } else { "" }
+          $securePwd = ConvertTo-SecureString -String $pwdSource -Force -AsPlainText
+          Import-PfxCertificate `
+              -FilePath $pfxPath `
+              -CertStoreLocation Cert:\CurrentUser\My `
+              -Password $securePwd | Out-Null
+          Remove-Item $pfxPath -Force
+
+      - name: Sign exe
+        id: sign
+        shell: pwsh
+        env:
+          WIN_SIGNING_CERT_THUMBPRINT: ${{ secrets.WIN_SIGNING_CERT_THUMBPRINT }}
+        run: |
+          $exePath = "dist\AutoApplyNext\AutoApplyNext.exe"
+          if (-not (Test-Path $exePath)) {
+              Write-Error "ERROR: built exe missing at $exePath"
+              Get-ChildItem dist -Recurse | Select-Object FullName
+              exit 1
+          }
+
+          $output = & powershell.exe -ExecutionPolicy Bypass -File packaging\windows\sign.ps1 $exePath 2>&1 | Out-String
+          $exitCode = $LASTEXITCODE
+          Write-Host $output
+
+          if ($exitCode -ne 0) {
+              Write-Error "sign.ps1 failed with exit $exitCode"
+              exit $exitCode
+          }
+
+          if ($output -match "MISSING_CERTS:") {
+              "is_dev_build=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+              "is_dev_build=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+
+      - name: Compute artefact filename and zip
+        id: name
+        shell: pwsh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          IS_DEV: ${{ steps.sign.outputs.is_dev_build }}
+        run: |
+          if ($env:IS_DEV -eq "true") {
+              $zipName = "AutoApplyNext-$($env:TAG)-windows-x64-DEV-BUILD.zip"
+          } else {
+              $zipName = "AutoApplyNext-$($env:TAG)-windows-x64.zip"
+          }
+          Compress-Archive -Path dist\AutoApplyNext\* -DestinationPath "dist\$zipName" -Force
+          "artefact_name=$zipName" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Get-ChildItem dist
+
+      - name: Build tufup payload
+        shell: pwsh
+        env:
+          TUFUP_TARGETS_KEY: ${{ secrets.TUFUP_TARGETS_KEY }}
+        run: |
+          if (-not $env:TUFUP_TARGETS_KEY) {
+              Write-Host "MISSING_CERTS: TUFUP_TARGETS_KEY"
+              Write-Host "Skipping tufup payload build. The platform binary will still be"
+              Write-Host "uploaded to the GitHub Release but no update metadata is generated."
+              exit 0
+          }
+          # Placeholder: real key material would be written to a temp file and
+          # passed to `python -m tufup targets add ...`. The user must set up
+          # the tufup repository layout (metadata/, targets/) before this works.
+          # See packaging/CERT_CHECKLIST.md "tufup" section.
+          Write-Host "TODO: invoke python -m tufup with the platform binary"
+          Write-Host "Expected layout: tufup-repo\metadata, tufup-repo\targets"
+
+      - name: Upload Windows artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.name.outputs.artefact_name }}
+          path: dist/${{ steps.name.outputs.artefact_name }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------------------
+  # Publish: download both platform artefacts, update tufup metadata if keys
+  # are present, attach everything to the GitHub Release.
+  # ---------------------------------------------------------------------------
+  publish-update-feed:
+    name: Publish update feed and GitHub Release
+    needs: [macos-build, windows-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      # Required to upload assets to the GitHub Release for the tag.
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install tufup
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install "tufup>=0.10"
+
+      - name: Download macOS artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.macos-build.outputs.artefact_name }}
+          path: release-assets/
+
+      - name: Download Windows artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.windows-build.outputs.artefact_name }}
+          path: release-assets/
+
+      - name: Update tufup metadata
+        shell: bash
+        env:
+          TUFUP_TARGETS_KEY: ${{ secrets.TUFUP_TARGETS_KEY }}
+          TUFUP_SNAPSHOT_KEY: ${{ secrets.TUFUP_SNAPSHOT_KEY }}
+          TUFUP_TIMESTAMP_KEY: ${{ secrets.TUFUP_TIMESTAMP_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for var in TUFUP_TARGETS_KEY TUFUP_SNAPSHOT_KEY TUFUP_TIMESTAMP_KEY; do
+            if [[ -z "${!var:-}" ]]; then
+              missing+=("$var")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "MISSING_CERTS: ${missing[*]}"
+            echo "Skipping tufup metadata update; GitHub Release will still be created"
+            echo "with the unsigned-or-signed binaries, but the in-app updater will"
+            echo "not see this version until you re-run with keys configured."
+            exit 0
+          fi
+          echo "TODO: write keys to temp files and run python -m tufup targets / snapshot / timestamp"
+          echo "      and push the resulting metadata to the update feed (e.g. GH Pages branch)."
+
+      - name: Detect dev build status
+        id: status
+        shell: bash
+        env:
+          MACOS_DEV: ${{ needs.macos-build.outputs.is_dev_build }}
+          WIN_DEV: ${{ needs.windows-build.outputs.is_dev_build }}
+        run: |
+          IS_DEV="false"
+          if [[ "$MACOS_DEV" == "true" ]] || [[ "$WIN_DEV" == "true" ]]; then
+            IS_DEV="true"
+          fi
+          echo "is_dev_build=${IS_DEV}" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: AutoApply Next ${{ steps.tag.outputs.tag }}
+          draft: false
+          prerelease: ${{ steps.status.outputs.is_dev_build == 'true' }}
+          generate_release_notes: true
+          files: |
+            release-assets/*
+          body: |
+            AutoApply Next ${{ steps.tag.outputs.tag }}
+
+            ${{ steps.status.outputs.is_dev_build == 'true' && 'This release contains DEV BUILD artefacts (one or more signing secrets were missing during build). See packaging/CERT_CHECKLIST.md for the secrets needed to produce a signed release.' || 'Signed and notarized release.' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,148 @@
+"""ProfileScreen: edit candidate (name/email/phone) and the resume text profile.
+
+Reads the engine workdir's `config.yaml` and `assets/profile.txt`, edits in
+place. The engine reads profile.txt on first invocation per process via a
+module-level cache (see `vendor/job-finder/utils.py:11-20`), so the user must
+restart the engine worker after a profile change to pick up new content.
+This is documented in-screen and is acceptable for Phase 2.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import yaml
+from PySide6.QtCore import Qt, Slot
+from PySide6.QtGui import QFont
+from PySide6.QtWidgets import (
+    QFormLayout,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QPushButton,
+    QTextEdit,
+    QVBoxLayout,
+    QWidget,
+)
+
+logger = logging.getLogger(__name__)
+
+
+class ProfileScreen(QWidget):
+    def __init__(self, *, engine_workdir: Path):
+        super().__init__()
+        self._engine_workdir = engine_workdir
+        self._config_path = engine_workdir / "config.yaml"
+        self._profile_path = engine_workdir / "assets" / "profile.txt"
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(12)
+
+        title = QLabel("Profile")
+        title.setFont(_h1())
+        layout.addWidget(title)
+
+        layout.addWidget(self._build_candidate_block())
+        layout.addWidget(self._build_resume_block(), stretch=1)
+        layout.addWidget(self._build_save_row())
+
+        self._load()
+
+    # ---------------------------------------------------------- widget build
+
+    def _build_candidate_block(self) -> QWidget:
+        block = QFrame()
+        block.setObjectName("candidate-block")
+        block.setStyleSheet(
+            "QFrame#candidate-block { border: 1px solid #d1d5db; border-radius: 8px; padding: 12px; }"
+        )
+        form = QFormLayout(block)
+        form.setContentsMargins(16, 16, 16, 16)
+        self._name = QLineEdit()
+        self._email = QLineEdit()
+        self._phone = QLineEdit()
+        form.addRow("Name:", self._name)
+        form.addRow("Email:", self._email)
+        form.addRow("Phone:", self._phone)
+        return block
+
+    def _build_resume_block(self) -> QWidget:
+        block = QFrame()
+        block.setObjectName("resume-block")
+        v = QVBoxLayout(block)
+        v.setContentsMargins(0, 0, 0, 0)
+        label = QLabel(
+            "Resume profile (this text is what the matcher and tailorer read). "
+            "Sections: PROFESSIONAL SUMMARY, CORE SKILLS, PROFESSIONAL EXPERIENCE."
+        )
+        label.setWordWrap(True)
+        label.setStyleSheet("color: #6b7280; font-size: 12px;")
+        v.addWidget(label)
+        self._resume = QTextEdit()
+        self._resume.setAcceptRichText(False)
+        self._resume.setStyleSheet(
+            "QTextEdit { font-family: 'SF Mono', 'Cascadia Code', Consolas, monospace; }"
+        )
+        v.addWidget(self._resume, stretch=1)
+        return block
+
+    def _build_save_row(self) -> QWidget:
+        row = QHBoxLayout()
+        wrap = QWidget()
+        wrap.setLayout(row)
+        row.addStretch(1)
+        self._save_btn = QPushButton("Save profile")
+        self._save_btn.setStyleSheet(
+            "QPushButton { background: #1d4ed8; color: white; padding: 8px 16px; border-radius: 6px; }"
+        )
+        self._save_btn.clicked.connect(self._save)
+        row.addWidget(self._save_btn)
+        return wrap
+
+    # ---------------------------------------------------------- behaviour
+
+    def _load(self) -> None:
+        try:
+            cfg = yaml.safe_load(self._config_path.read_text()) or {}
+            cand = cfg.get("candidate") or {}
+            self._name.setText(str(cand.get("name", "")))
+            self._email.setText(str(cand.get("email", "")))
+            self._phone.setText(str(cand.get("phone", "")))
+        except Exception as exc:
+            logger.warning("ProfileScreen: failed to load config.yaml: %s", exc)
+        try:
+            self._resume.setPlainText(self._profile_path.read_text())
+        except Exception as exc:
+            logger.warning("ProfileScreen: failed to load profile.txt: %s", exc)
+
+    @Slot()
+    def _save(self) -> None:
+        try:
+            cfg = yaml.safe_load(self._config_path.read_text()) or {}
+            cfg.setdefault("candidate", {})
+            cfg["candidate"]["name"] = self._name.text().strip()
+            cfg["candidate"]["email"] = self._email.text().strip()
+            cfg["candidate"]["phone"] = self._phone.text().strip()
+            self._config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+            self._profile_path.parent.mkdir(parents=True, exist_ok=True)
+            self._profile_path.write_text(self._resume.toPlainText())
+            QMessageBox.information(
+                self,
+                "Saved",
+                "Profile saved. Restart the engine worker to pick up changes "
+                "(the engine caches profile.txt per process).",
+            )
+        except Exception as exc:
+            logger.exception("ProfileScreen: save failed")
+            QMessageBox.warning(self, "Save failed", str(exc))
+
+
+def _h1() -> QFont:
+    f = QFont()
+    f.setPointSize(20)
+    f.setBold(True)
+    return f

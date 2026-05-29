@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- macOS entitlements for AutoApply Next: hardened runtime opt-outs needed by Python, PySide6 JIT paths, and Playwright/Chromium dynamic loading. No App Sandbox. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+        Python's CPython interpreter and PySide6 (via Qt) allocate writable
+        executable memory for bytecode and some JIT paths. Without this the
+        hardened runtime kills the process at launch.
+    -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+
+    <!--
+        Allow JIT for any V8 / engine paths Playwright drives inside Chromium
+        once it is launched as a child process.
+    -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+
+    <!--
+        Playwright downloads Chromium into the user library at first run.
+        That Chromium has its own Apple signature chain, not ours, so we
+        must allow loading libraries that are not signed by the same team id.
+    -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+
+    <!--
+        The app talks to Seek, Anthropic, Supabase, and the tufup update feed
+        over HTTPS.
+    -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!--
+        User picks resume PDFs and target folders via NSOpenPanel. The
+        engine writes generated docs and the JobApplications xlsx to the
+        user-chosen output directory.
+    -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!--
+        Allow DYLD environment variables. PySide6 / Qt occasionally rely on
+        DYLD_FRAMEWORK_PATH for its own frameworks at launch.
+    -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+
+    <!--
+        Explicitly NOT setting com.apple.security.app-sandbox.
+        Sandboxing would block the Playwright Chromium download and the
+        user-chosen output path writes the engine performs.
+    -->
+</dict>
+</plist>

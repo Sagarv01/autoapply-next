@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "autoapply-next"
+version = "0.1.0"
+description = "PySide6 desktop GUI wrapping the job-finder Seek automation engine"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "AutoApply Next", email = "noreply@example.com" }]
+license = { text = "Proprietary" }
+
+# Runtime dependencies.
+# Engine deps are duplicated here from vendor/job-finder/requirements.txt because
+# they must be installed in the same environment as the GUI (engine runs
+# in-process). Versions match what the vendored engine was last tested against.
+dependencies = [
+  # GUI
+  "PySide6>=6.7,<6.10",
+
+  # Engine: re-listing vendored deps so the GUI environment provides them
+  "playwright>=1.46,<2",
+  "playwright-stealth>=1.0",
+  "browser-use>=0.1.40",
+  "anthropic>=0.40",
+  "openai>=1.40",
+  "langchain-anthropic>=0.2",
+  "python-docx>=1.0",
+  "reportlab>=4.0",
+  "openpyxl>=3.1",
+  "python-dotenv>=1.0",
+  "aiofiles>=23",
+  "pyyaml>=6.0",
+
+  # Auth (slice 1)
+  "supabase>=2.7",
+
+  # Logging
+  "structlog>=24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-asyncio>=0.23",
+  "pytest-qt>=4.4",
+  "pytest-cov>=5.0",
+  "pyinstaller>=6.5",
+  "ruff>=0.5",
+  "tufup>=0.10",
+]
+
+[project.scripts]
+autoapply-next = "autoapply_next.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autoapply_next"]
+
+# pytest config
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+markers = [
+  "requires_engine: needs the real vendored engine importable",
+  "requires_live_seek: hits real Seek pages with the live session (manual)",
+  "requires_qt: spins up a QApplication",
+]
+
+# ruff config: light, just formatting + obvious errors
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008"]

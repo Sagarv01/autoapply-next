@@ -1,0 +1,13 @@
+.env
+config.yaml
+jobs.db
+output/
+errors/
+sessions/
+bot.log*
+venv/
+__pycache__/
+*.pyc
+.DS_Store
+.worktrees/
+.superpowers/

@@ -1,0 +1,22 @@
+candidate:
+  name: "Your Name"
+  email: "you@example.com"
+  phone: "+61XXXXXXXXX"
+
+search:
+  skills:
+    - "Amazon Connect"
+    - "Terraform AWS"
+    - "DevOps AWS"
+    - "Kubernetes AWS"
+    - "Amazon Lex"
+    - "Conversational AI"
+    - "IVR contact centre"
+    - "CI/CD AWS"
+  location: "Australia"
+  match_threshold: 65
+
+scraper:
+  interval_seconds: 300
+  interval_jitter_seconds: 60
+  board_block_pause_minutes: 15
