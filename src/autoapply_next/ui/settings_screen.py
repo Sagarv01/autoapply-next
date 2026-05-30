@@ -145,14 +145,18 @@ class SettingsScreen(QWidget):
         self._cap_spin.setRange(0, 999)
         self._cap_spin.setValue(self._settings.daily_cap)
         self._cap_spin.setSuffix(" / day")
+        self._cap_spin.setToolTip(
+            "Stored for future use. The current build runs one job at a time "
+            "interactively; the cap is not enforced anywhere yet."
+        )
         self._cap_spin.valueChanged.connect(
             lambda v: setattr(self._settings, "daily_cap", v)
         )
         form.addRow("Daily application cap:", self._cap_spin)
 
         note = QLabel(
-            "Threshold determines when a scraped job is queued for apply. The daily cap "
-            "is informational for now (the engine is one-job-at-a-time)."
+            "Threshold determines when a scraped job would be skipped at apply "
+            "time. The daily cap is stored but not yet enforced (informational only)."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #6b7280; font-size: 12px;")

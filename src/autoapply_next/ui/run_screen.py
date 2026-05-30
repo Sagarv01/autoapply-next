@@ -15,7 +15,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSize, Slot
-from PySide6.QtGui import QFont, QPixmap
+from PySide6.QtGui import QFont, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from ..engine.progress import ProgressEvent, ProgressStage
 from ..engine.results import ApplicationResult, ApplicationStatus
 from ..engine.worker import EngineWorker
+from ..safe_ui import safe_slot, show_error_dialog
 from .settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -193,13 +194,24 @@ class RunScreen(QWidget):
             )
 
     @Slot()
+    @safe_slot
     def _on_run_clicked(self) -> None:
         url = self._url_input.text().strip()
         if not url:
-            QMessageBox.warning(self, "URL needed", "Paste a Seek job URL first.")
+            show_error_dialog(
+                self,
+                "URL needed",
+                "Paste a Seek job URL into the field above before clicking Run dry-run.",
+            )
+            self._url_input.setFocus()
             return
         if "seek.com" not in url:
-            QMessageBox.warning(self, "Seek only", "The minimal product supports Seek quick-apply only.")
+            show_error_dialog(
+                self,
+                "Seek only",
+                "The minimal product supports Seek quick-apply only. "
+                "Other boards are not implemented in this build.",
+            )
             return
 
         if self._settings.allow_real_submit:
@@ -246,6 +258,7 @@ class RunScreen(QWidget):
                     lbl.setStyleSheet(_stage_done_css())
 
     @Slot(object)
+    @safe_slot
     def _on_finished(self, result: ApplicationResult) -> None:
         self._append_log(f"[finished] {result.status.value}")
         if result.status == ApplicationStatus.DRY_RUN_VERIFIED:
@@ -254,12 +267,56 @@ class RunScreen(QWidget):
                 _stage_done_css()
             )
         elif result.status == ApplicationStatus.SUBMITTED:
-            self._screenshot_label.setText("(real submission, no screenshot)")
+            self._screenshot_label.setPixmap(QPixmap())
+            self._screenshot_label.setText("Submitted (real submission, no screenshot).")
+            self._stage_labels[ProgressStage.DRY_RUN_VERIFIED].setStyleSheet(
+                _stage_done_css()
+            )
+            self._stage_labels[ProgressStage.DRY_RUN_VERIFIED].setText("Submitted")
         elif result.status == ApplicationStatus.SKIPPED_LOW_SCORE:
-            self._append_log(f"Skipped: score {result.score} below threshold")
-        elif result.status == ApplicationStatus.FAILED:
             self._append_log(
+                f"Skipped: score {result.score} below threshold"
+            )
+            self._screenshot_label.setPixmap(QPixmap())
+            self._screenshot_label.setText(
+                f"Skipped: match score {result.score} is below the threshold "
+                f"(set in Settings).\nThe engine did not tailor or apply this job."
+            )
+            self._screenshot_label.setStyleSheet(
+                "QLabel { border: 1px solid #c2410c; background: #fff7ed; "
+                "color: #7c2d12; padding: 12px; }"
+            )
+        elif result.status == ApplicationStatus.CANCELLED:
+            self._append_log("Cancelled by user.")
+            self._screenshot_label.setPixmap(QPixmap())
+            self._screenshot_label.setText(
+                "Cancelled. The browser context was torn down."
+            )
+            self._screenshot_label.setStyleSheet(
+                "QLabel { border: 1px solid #6b7280; background: #f9fafb; "
+                "color: #374151; padding: 12px; }"
+            )
+        elif result.status == ApplicationStatus.FAILED:
+            err_line = (
                 f"FAILED ({result.exception_type}): {result.error_message}"
+            )
+            self._append_log(err_line)
+            # Mark the strip's active stage red so the visible state matches
+            # the log. The adapter records which stage failed in detail.
+            self._mark_failed_stage()
+            # Replace the "(running...)" placeholder with a red error panel.
+            self._screenshot_label.setPixmap(QPixmap())
+            self._screenshot_label.setText(self._friendly_failure_text(result))
+            self._screenshot_label.setStyleSheet(
+                "QLabel { border: 2px solid #b91c1c; background: #fef2f2; "
+                "color: #7f1d1d; padding: 12px; }"
+            )
+            # And a non-blocking dialog so the user definitely notices.
+            show_error_dialog(
+                self,
+                "Dry-run failed",
+                self._friendly_failure_text(result),
+                err_line,
             )
 
     @Slot(str, str)
@@ -274,10 +331,56 @@ class RunScreen(QWidget):
 
     def _append_log(self, line: str) -> None:
         self._log_view.appendPlainText(line)
-        # Auto-scroll.
+        # Auto-scroll. In PySide6 the enum members are accessed via the class
+        # (not the instance), unlike PyQt5/6 where `cursor.End` worked.
         cursor = self._log_view.textCursor()
-        cursor.movePosition(cursor.End)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
         self._log_view.setTextCursor(cursor)
+
+    def _mark_failed_stage(self) -> None:
+        """Find the last stage we styled as 'active' and recolour it red."""
+        for stage, lbl in self._stage_labels.items():
+            css = lbl.styleSheet()
+            if "#1d4ed8" in css or "#15803d" in css and "background" in css:
+                lbl.setStyleSheet(
+                    "padding: 6px; border: 1px solid #b91c1c; "
+                    "border-radius: 6px; color: white; background: #b91c1c; "
+                    "font-weight: bold;"
+                )
+
+    def _friendly_failure_text(self, result: ApplicationResult) -> str:
+        et = result.exception_type or "Error"
+        msg = (result.error_message or "(no message)").strip()
+        # Bespoke friendly hints for known engine error types. Anything not
+        # listed falls through with the raw message.
+        if et == "JobNotQuickApplyError":
+            return (
+                "This job is not a Seek quick-apply listing (it routes to an "
+                "external recruiter site). Pick a different job from the "
+                "Queue, or apply manually on the company's site."
+            )
+        if et == "PermissionError":
+            return (
+                "Seek says we are not signed in. Open the Seek session screen "
+                "and click 'Open Seek to log in' to refresh the session."
+            )
+        if et == "BoardBlockedError":
+            return (
+                "Seek blocked the request (captcha, rate-limit, or session "
+                "issue). Wait a minute, then retry. If it keeps blocking, "
+                "log in again from the Seek session screen."
+            )
+        if et == "TimeoutError":
+            return (
+                "The apply form took too long to complete. Try again. If it "
+                "fails repeatedly the form may have changed; check the log."
+            )
+        if et == "CoverLetterQualityError":
+            return (
+                "The tailored cover letter did not pass the engine's quality "
+                "gate. Rerun, or edit your profile and try again."
+            )
+        return f"Dry-run failed at {result.exception_type}: {msg}"
 
     def _show_screenshot(self, path: Path | None) -> None:
         if path is None or not Path(path).exists():

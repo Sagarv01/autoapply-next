@@ -28,6 +28,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..safe_ui import safe_slot, show_error_dialog
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,25 +122,69 @@ class ProfileScreen(QWidget):
             logger.warning("ProfileScreen: failed to load profile.txt: %s", exc)
 
     @Slot()
+    @safe_slot
     def _save(self) -> None:
+        # Validate inputs visibly before writing anything to disk.
+        name = self._name.text().strip()
+        email = self._email.text().strip()
+        phone = self._phone.text().strip()
+        # Keep the resume content exactly as typed (trailing newlines and
+        # all) so the engine sees what the user saw.
+        resume = self._resume.toPlainText()
+        missing: list[str] = []
+        if not name:
+            missing.append("Name")
+        if not email:
+            missing.append("Email")
+        elif "@" not in email:
+            missing.append("Email (looks invalid)")
+        if not phone:
+            missing.append("Phone")
+        if not resume.strip():
+            missing.append("Resume profile text")
+        if missing:
+            show_error_dialog(
+                self,
+                "Profile incomplete",
+                "Please fill in:\n  - " + "\n  - ".join(missing) +
+                "\n\nThe engine needs all four to run; saving an empty profile "
+                "would make every job application blow up downstream.",
+            )
+            return
+        # Write atomically: write to a temp file, then replace, so a crash
+        # mid-write does not leave a half-written config.
         try:
-            cfg = yaml.safe_load(self._config_path.read_text()) or {}
+            cfg_existing = (
+                yaml.safe_load(self._config_path.read_text())
+                if self._config_path.exists()
+                else {}
+            )
+            cfg = cfg_existing or {}
             cfg.setdefault("candidate", {})
-            cfg["candidate"]["name"] = self._name.text().strip()
-            cfg["candidate"]["email"] = self._email.text().strip()
-            cfg["candidate"]["phone"] = self._phone.text().strip()
-            self._config_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+            cfg["candidate"]["name"] = name
+            cfg["candidate"]["email"] = email
+            cfg["candidate"]["phone"] = phone
+            self._config_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_cfg = self._config_path.with_suffix(self._config_path.suffix + ".tmp")
+            tmp_cfg.write_text(yaml.safe_dump(cfg, sort_keys=False))
+            tmp_cfg.replace(self._config_path)
             self._profile_path.parent.mkdir(parents=True, exist_ok=True)
-            self._profile_path.write_text(self._resume.toPlainText())
+            tmp_profile = self._profile_path.with_suffix(self._profile_path.suffix + ".tmp")
+            tmp_profile.write_text(resume)
+            tmp_profile.replace(self._profile_path)
             QMessageBox.information(
                 self,
                 "Saved",
-                "Profile saved. Restart the engine worker to pick up changes "
+                "Profile saved. Restart the app to pick up the changes "
                 "(the engine caches profile.txt per process).",
             )
         except Exception as exc:
             logger.exception("ProfileScreen: save failed")
-            QMessageBox.warning(self, "Save failed", str(exc))
+            show_error_dialog(
+                self,
+                "Save failed",
+                f"Could not save the profile: {exc}",
+            )
 
 
 def _h1() -> QFont:

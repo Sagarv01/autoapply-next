@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 
 from ..engine.scraping import ScrapeResult
 from ..engine.worker import EngineWorker
+from ..safe_ui import safe_slot, show_error_dialog
 from .settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -174,10 +175,17 @@ class QueueScreen(QWidget):
     # ---------------------------------------------------------- behaviour
 
     @Slot()
+    @safe_slot
     def _on_refresh_clicked(self) -> None:
         kw = self._keyword_input.text().strip()
         if not kw:
-            self._count_label.setText("Type a search keyword first.")
+            show_error_dialog(
+                self,
+                "Keyword needed",
+                "Type a search keyword (for example 'platform engineer') "
+                "before clicking Scrape and score.",
+            )
+            self._keyword_input.setFocus()
             return
         self._settings.last_scrape_keyword = kw
         self._count_label.setText(f"Scraping Seek for '{kw}'...")
@@ -205,12 +213,27 @@ class QueueScreen(QWidget):
         self._refresh_table()
 
     @Slot(str)
+    @safe_slot
     def _on_worker_state(self, state: str) -> None:
         running = state in ("running", "cancelling")
         self._refresh_btn.setEnabled(not running)
         self._cancel_btn.setEnabled(running)
         self._progress_bar.setVisible(running)
         self._keyword_input.setEnabled(not running)
+        # Per-row Run buttons must not look clickable while the worker is
+        # busy. They share the worker so a click would just bounce off as
+        # 'busy'.
+        for row in range(self._table.rowCount()):
+            widget = self._table.cellWidget(row, 5)
+            if widget is not None:
+                widget.setEnabled(not running)
+                if running:
+                    widget.setToolTip(
+                        "Engine busy with another job. Cancel it first, or "
+                        "wait for it to finish."
+                    )
+                else:
+                    widget.setToolTip("")
 
     @Slot(str, str)
     def _on_worker_failed(self, op: str, msg: str) -> None:

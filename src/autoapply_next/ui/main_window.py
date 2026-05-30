@@ -18,7 +18,6 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
-    QMessageBox,
     QStackedWidget,
     QStatusBar,
     QToolBar,
@@ -26,6 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..engine.worker import EngineWorker
+from ..safe_ui import get_bus, safe_slot, show_error_dialog
 from .profile_screen import ProfileScreen
 from .queue_screen import QueueScreen
 from .results_screen import ResultsScreen
@@ -86,6 +86,9 @@ class MainWindow(QMainWindow):
 
         # Wire Queue -> Run handoff: selecting a row swaps to Run with URL preloaded.
         self._queue.run_requested.connect(self._on_queue_run_requested)
+        # Sign-in is a stub; the Skip button emits `authenticated` and we
+        # respond by routing to the Seek session screen, the natural next step.
+        self._signin.authenticated.connect(self._on_signin_authenticated)
         for screen in [
             self._signin,
             self._session,
@@ -155,6 +158,8 @@ class MainWindow(QMainWindow):
         self._worker.state_changed.connect(self._on_worker_state)
         self._worker.failed.connect(self._on_worker_failed)
         self._settings.match_threshold_changed.connect(self._on_threshold_changed)
+        # Surface any uncaught exception / Qt critical / safe_slot capture.
+        get_bus().error.connect(self._on_bus_error)
 
     # -------------------------------------------------------------- navigation
 
@@ -188,16 +193,40 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Engine: {state}", 5000)
 
     @Slot(str, str)
-    def _on_worker_failed(self, job_url: str, message: str) -> None:
-        QMessageBox.warning(self, "Engine error", f"{job_url}\n\n{message}")
+    @safe_slot
+    def _on_worker_failed(self, op: str, message: str) -> None:
+        show_error_dialog(
+            self,
+            f"Engine error: {op}",
+            (
+                f"{message}\n\nThe app is still usable. Try the operation again, "
+                "or use the toolbar to switch screens."
+            ),
+        )
+
+    @Slot(str, str)
+    @safe_slot
+    def _on_bus_error(self, title: str, detail: str) -> None:
+        # Detail can be long; show a short summary up top, full text in expander.
+        summary = detail.splitlines()[0] if detail else "An error occurred."
+        show_error_dialog(self, title or "Error", summary, detail)
 
     @Slot(str)
+    @safe_slot
     def _on_queue_run_requested(self, url: str) -> None:
         self._run.set_url(url)
         self._goto(self._run)
 
+    @Slot(str)
+    @safe_slot
+    def _on_signin_authenticated(self, _user_id: str) -> None:
+        # Stub sign-in done; nudge to the natural next step.
+        self.statusBar().showMessage("Signed in (dev mode). Set up your Seek session next.", 5000)
+        self._goto(self._session)
+
     # Also bump the worker's threshold when Settings changes.
     @Slot(int)
+    @safe_slot
     def _on_threshold_changed(self, value: int) -> None:
         self._worker.set_match_threshold(value)
 

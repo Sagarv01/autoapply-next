@@ -46,17 +46,24 @@ class SignInScreen(QWidget):
         subtitle.setStyleSheet("color: #6b7280;")
         layout.addWidget(subtitle)
 
+        deferred_tip = (
+            "Supabase sign-in is not yet wired. Use 'Skip (dev mode)' to "
+            "continue. The full sign-in flow is on the roadmap; until then "
+            "this control is disabled on purpose, not broken."
+        )
         self._phone = QLineEdit()
-        self._phone.setPlaceholderText("+61 4xx xxx xxx")
+        self._phone.setPlaceholderText("+61 4xx xxx xxx (sign-in disabled)")
         self._phone.setEnabled(False)
         self._phone.setMaximumWidth(360)
+        self._phone.setToolTip(deferred_tip)
         layout.addWidget(self._phone, alignment=Qt.AlignCenter)
 
         self._password = QLineEdit()
-        self._password.setPlaceholderText("password")
+        self._password.setPlaceholderText("password (sign-in disabled)")
         self._password.setEchoMode(QLineEdit.Password)
         self._password.setEnabled(False)
         self._password.setMaximumWidth(360)
+        self._password.setToolTip(deferred_tip)
         layout.addWidget(self._password, alignment=Qt.AlignCenter)
 
         row = QHBoxLayout()
@@ -65,17 +72,22 @@ class SignInScreen(QWidget):
         signin_btn.setEnabled(False)
         signin_btn.setMinimumWidth(160)
         signin_btn.setStyleSheet(_primary_btn())
+        signin_btn.setToolTip(deferred_tip)
         row.addWidget(signin_btn)
         skip_btn = QPushButton("Skip (dev mode)")
         skip_btn.setMinimumWidth(160)
         skip_btn.setStyleSheet(_secondary_btn())
+        skip_btn.setToolTip(
+            "Skip the sign-in stub and continue. MainWindow listens for this "
+            "and routes you to the Seek session screen."
+        )
         skip_btn.clicked.connect(lambda: self.authenticated.emit("dev-user"))
         row.addWidget(skip_btn)
         layout.addLayout(row)
 
         note = QLabel(
-            "Supabase wiring lands in Phase 3 slice 1. The skip button is intentional "
-            "until then."
+            "Supabase wiring is on the roadmap. Until then the skip button is "
+            "the intended path: click it to continue to the Seek session step."
         )
         note.setAlignment(Qt.AlignCenter)
         note.setStyleSheet("color: #9ca3af; font-size: 12px;")

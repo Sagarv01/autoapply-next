@@ -16,6 +16,7 @@ from PySide6.QtWidgets import QApplication
 
 from .platform.paths import engine_workdir, app_log_dir
 from .safe_logging.scrubber import install_global_scrubbing
+from .safe_ui import install_global_handlers
 from .ui.main_window import MainWindow
 
 
@@ -52,6 +53,9 @@ def main() -> int:
     QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, False)
 
     app = QApplication(sys.argv)
+    # Install excepthook + Qt handler AFTER QApplication is constructed so
+    # qInstallMessageHandler can hook the right context.
+    install_global_handlers()
     window = MainWindow(engine_workdir=workdir)
     window.show()
     # Bind the method reference to a local name so the source text does not
