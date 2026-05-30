@@ -322,6 +322,21 @@ async def apply_to_job(
                         score=score,
                         reasoning=reasoning,
                     )
+                # Persist the captured cover-letter text alongside the PDF so
+                # the Results screen can render it later without re-running
+                # Claude. The file is `<cover_pdf>.txt`. Failure here is not
+                # fatal; we still proceed to apply.
+                if hooks.captured.cover_letter_text:
+                    try:
+                        Path(str(cover_pdf) + ".txt").write_text(
+                            hooks.captured.cover_letter_text,
+                            encoding="utf-8",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "apply_to_job: cover letter sidecar write failed: %s",
+                            exc,
+                        )
                 progress(
                     ProgressEvent(
                         stage=ProgressStage.TAILOR,

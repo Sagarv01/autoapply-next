@@ -1,5 +1,81 @@
 # AutoApply Next: iterate-fix test log
 
+## Capstone 2026-05-30T11:40:12
+- keyword: site reliability engineer
+- total_scraped: 531
+- new_jobs: 525
+- scored: 6
+- scrape_errors: 0
+  - score=2 'Senior Civil Design Engineer' 'SSA Group' https://au.seek.com/job/92420998
+  - score=2 'Commercial Construction - Site Supervisory Staff - All Levels' 'ECi EXECUTiVE' https://au.seek.com/job/92420551
+  - score=2 'Mining Engineer - Ventilation' 'Evolution Mining' https://au.seek.com/job/92420276
+  - score=2 'Mining Engineer Planning' 'Evolution Mining' https://au.seek.com/job/92420216
+  - score=2 'Aircraft Maintenance Engineer (Structures)' 'BAE Systems' https://au.seek.com/job/92420211
+  - score=2 'Principal Fire Protection Engineer' 'AECOM Australia PTY LTD' https://au.seek.com/job/92419726
+- attempts: 1
+  - trying score=2 https://au.seek.com/job/92420998
+- picked: score=2 https://au.seek.com/job/92420998
+- run_status: dry_run_verified
+- run_score: 2
+- run_elapsed_total_sec: 488.5
+- resume_pdf: output/SagarVerma__SeekListing92420998_20260530_114635_377.pdf
+- cover_pdf: output/CoverLetter__SeekListing92420998_20260530_114638_212.pdf
+- screenshot: /Users/sagarverma/Pictures/Claude-experiments/job-finder/output/dryrun-screenshots/dryrun-submit-ready-20260530T114819.png
+- screening_answers: 0
+  - [peek] Fetching listing https://au.seek.com/job/92420998
+  - [score] Scoring match
+  - [score] Score 2/100
+  - [tailor] Generating tailored resume + cover letter
+  - [tailor] Tailored documents ready
+  - [apply] Driving Seek apply form (dry-run)
+  - [dry_run_verified] Dry-run reached submit-ready (button='Submit application')
+- cover_letter_text_in_result: True
+- cover_letter_sidecar_exists: True
+- journal_questions_recorded: 0
+- journal_entry_found: True
+
+## Capstone 2026-05-30T11:35:29
+- keyword: site reliability engineer
+- total_scraped: 531
+- new_jobs: 531
+- scored: 6
+- scrape_errors: 0
+  - score=2 'Mobile Plant Maintenance Supervisor' 'REGROUP Australia' https://au.seek.com/job/92421802
+  - score=4 'Project Engineer - WA Projects | Perth Based | Site role' 'Liberty Industrial' https://au.seek.com/job/92421763
+  - score=3 'Precast Project & Design Manager for Industry Leader' 'Talent X Pty Ltd' https://au.seek.com/job/92421282
+  - score=2 'Mining Engineer' 'Harmony Australasia' https://au.seek.com/job/92421241
+  - score=2 'Structural Engineer for Patented One-Of-A-Kind Product!' 'Talent X Pty Ltd' https://au.seek.com/job/92421162
+  - score=2 'Structural Engineer for Patented One-Of-A-Kind Product!' 'Talent X Pty Ltd' https://au.seek.com/job/92421163
+- picked: score=4 https://au.seek.com/job/92421763
+- run_status: failed
+- run_score: None
+- run_elapsed_total_sec: 243.5
+- resume_pdf: None
+- cover_pdf: None
+- screenshot: None
+- screening_answers: 0
+  - [peek] Fetching listing https://au.seek.com/job/92421763
+  - [failed] peek failed: JobNotQuickApplyError: Job is not a Seek quick-apply listing: https://au.seek.com/job/92421763
+- cover_letter_text_in_result: False
+- cover_letter_sidecar_exists: False
+- journal_entry_found: False
+
+## Capstone 2026-05-30T11:32:14
+- keyword: site reliability engineer
+- total_scraped: 531
+- new_jobs: 0
+- scored: 0
+- scrape_errors: 0
+- outcome: NO_JOBS_TO_TEST
+
+## Capstone 2026-05-30T11:29:28
+- keyword: AWS
+- total_scraped: 212
+- new_jobs: 0
+- scored: 0
+- scrape_errors: 0
+- outcome: NO_JOBS_TO_TEST
+
 ## What this is
 
 This file is the running log of the live-Seek dry-run integration test, the

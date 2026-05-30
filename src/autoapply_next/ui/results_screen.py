@@ -1,9 +1,11 @@
 """ResultsScreen: per-job outcome history with cover letter + screening preview.
 
-Reads from `jobs.db` for the application history, and from
-`errors/applications.jsonl` for per-job journals (questions answered, source,
-errors). Clicking a row shows the cover letter PDF path and the screening
-answers verbatim so the user can review what would go out under their name.
+Reads from `jobs.db` for the application history, from the cover-letter
+`.txt` sidecar (written by the adapter after `tailorer.tailor` runs) for
+the cover body, and from `errors/applications.jsonl` for the per-job
+journals (questions answered, validation errors). Both the cover letter
+text and the screening Q&A are surfaced verbatim so the user can review
+what would go out under their name before flipping `ALLOW_REAL_SUBMIT`.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -24,6 +27,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -51,6 +55,9 @@ class ResultsScreen(QWidget):
         self._refresh_btn.clicked.connect(self._refresh)
         row.addWidget(self._refresh_btn)
         row.addStretch(1)
+        self._count_label = QLabel("")
+        self._count_label.setStyleSheet("color: #6b7280;")
+        row.addWidget(self._count_label)
         layout.addLayout(row)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -72,7 +79,6 @@ class ResultsScreen(QWidget):
         self._table.setHorizontalHeaderLabels(
             ["When", "Title @ Company", "Score", "Status"]
         )
-        self._table.horizontalHeader().setStretchLastSection(False)
         self._table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Stretch
         )
@@ -87,18 +93,49 @@ class ResultsScreen(QWidget):
         v = QVBoxLayout(wrap)
         v.setContentsMargins(0, 0, 0, 0)
 
-        header = QLabel("Selected application")
-        header.setFont(_h2())
-        v.addWidget(header)
+        self._header_label = QLabel("Select a row to see details.")
+        self._header_label.setFont(_h2())
+        self._header_label.setWordWrap(True)
+        v.addWidget(self._header_label)
 
-        self._detail_view = QPlainTextEdit()
-        self._detail_view.setReadOnly(True)
-        self._detail_view.setStyleSheet(
-            "QPlainTextEdit { background: #f9fafb; color: #111827; "
-            "font-family: 'SF Mono', Consolas, monospace; font-size: 12px; }"
+        self._meta_label = QLabel("")
+        self._meta_label.setStyleSheet("color: #6b7280;")
+        self._meta_label.setWordWrap(True)
+        v.addWidget(self._meta_label)
+
+        self._tabs = QTabWidget()
+
+        # Tab 1: cover letter
+        self._cover_view = QPlainTextEdit()
+        self._cover_view.setReadOnly(True)
+        self._cover_view.setStyleSheet(_text_view_css())
+        self._cover_view.setPlaceholderText(
+            "Cover letter text will appear here once a job with a tailored "
+            "cover letter is selected. The text is read from <cover_pdf>.txt "
+            "alongside the PDF the engine generated."
         )
-        self._detail_view.setPlaceholderText("Select a row to see details.")
-        v.addWidget(self._detail_view, stretch=1)
+        self._tabs.addTab(self._cover_view, "Cover letter")
+
+        # Tab 2: screening Q&A
+        self._qa_view = QPlainTextEdit()
+        self._qa_view.setReadOnly(True)
+        self._qa_view.setStyleSheet(_text_view_css())
+        self._qa_view.setPlaceholderText(
+            "Screening questions and answers from the engine's journal will "
+            "appear here."
+        )
+        self._tabs.addTab(self._qa_view, "Screening Q && A")
+
+        # Tab 3: raw journal + DB row
+        self._raw_view = QPlainTextEdit()
+        self._raw_view.setReadOnly(True)
+        self._raw_view.setStyleSheet(_text_view_css())
+        self._raw_view.setPlaceholderText(
+            "Raw journal + DB fields. Useful for debugging a failure."
+        )
+        self._tabs.addTab(self._raw_view, "Raw")
+
+        v.addWidget(self._tabs, stretch=1)
         return wrap
 
     # ---------------------------------------------------------- behaviour
@@ -108,6 +145,7 @@ class ResultsScreen(QWidget):
         self._rows: list[dict] = []
         if not self._db_path.exists():
             self._table.setRowCount(0)
+            self._count_label.setText(f"No jobs.db at {self._db_path}")
             return
         try:
             with sqlite3.connect(self._db_path) as conn:
@@ -121,6 +159,7 @@ class ResultsScreen(QWidget):
         except sqlite3.OperationalError as exc:
             logger.warning("ResultsScreen: SQLite read failed: %s", exc)
             self._table.setRowCount(0)
+            self._count_label.setText(f"DB read failed: {exc}")
             return
 
         self._table.setRowCount(len(self._rows))
@@ -137,53 +176,107 @@ class ResultsScreen(QWidget):
                 i, 2, QTableWidgetItem(str(row.get("match_score") or ""))
             )
             self._table.setItem(i, 3, QTableWidgetItem(str(row.get("status") or "")))
+        self._count_label.setText(f"{len(self._rows)} rows")
 
     @Slot(int, int, int, int)
     def _on_row_changed(self, cur_row: int, _c: int, _pr: int, _pc: int) -> None:
         if cur_row < 0 or cur_row >= len(self._rows):
-            self._detail_view.clear()
+            self._reset_detail()
             return
         row = self._rows[cur_row]
+        self._header_label.setText(
+            f"{row.get('title') or '(no title)'} at {row.get('company') or '(no company)'}"
+        )
+        self._meta_label.setText(
+            f"Score: {row.get('match_score')} | Status: {row.get('status')} | "
+            f"When: {row.get('timestamp')}\n{row.get('url')}"
+        )
+
+        # Cover letter from sidecar.
+        cover_pdf = row.get("cover_letter_file")
+        if cover_pdf:
+            sidecar = Path(self._engine_workdir) / Path(cover_pdf + ".txt")
+            # The engine writes cover paths relative to cwd; the sidecar is
+            # cwd-relative too. Try both.
+            candidates = [
+                Path(cover_pdf + ".txt"),
+                self._engine_workdir / Path(cover_pdf + ".txt"),
+                self._engine_workdir / Path(cover_pdf).name.replace(".pdf", ".pdf.txt"),
+            ]
+            cover_text = None
+            cover_path_used: Path | None = None
+            for cand in candidates:
+                try:
+                    if cand.exists():
+                        cover_text = cand.read_text(encoding="utf-8")
+                        cover_path_used = cand
+                        break
+                except Exception as exc:
+                    logger.warning("cover sidecar read failed: %s", exc)
+            if cover_text is not None:
+                self._cover_view.setPlainText(
+                    f"# Source: {cover_path_used}\n# PDF: {cover_pdf}\n\n"
+                    f"{cover_text}"
+                )
+            else:
+                self._cover_view.setPlainText(
+                    f"(No cover letter sidecar found.)\n"
+                    f"Expected at: {cover_pdf}.txt\n"
+                    "Older runs predate the sidecar; only the PDF was written. "
+                    f"Open the PDF directly: {cover_pdf}"
+                )
+        else:
+            self._cover_view.setPlainText(
+                "(No cover letter recorded for this row.)"
+            )
+
+        # Journal-driven Q&A.
         journal = self._find_journal(row.get("url"))
-        lines = [
-            f"URL:         {row.get('url')}",
-            f"Title:       {row.get('title')}",
-            f"Company:     {row.get('company')}",
-            f"Status:      {row.get('status')}",
-            f"Score:       {row.get('match_score')}",
-            f"Resume PDF:  {row.get('resume_file')}",
-            f"Cover PDF:   {row.get('cover_letter_file')}",
-            f"Notes:       {row.get('notes')}",
-            "",
-        ]
         if journal is None:
-            lines.append("(no journal entry found for this URL)")
+            self._qa_view.setPlainText("(No journal entry found for this URL.)")
         else:
             qs = journal.get("questions_answered") or []
-            lines.append(f"Questions answered: {len(qs)}")
-            for q in qs:
-                lines.append(
-                    f"  Q: {q.get('question')!r}"
+            if not qs:
+                self._qa_view.setPlainText(
+                    "(No screening questions recorded for this run.)"
                 )
-                lines.append(
-                    f"     -> {q.get('answer')!r}  [{q.get('source')}]"
-                )
-            errs = journal.get("validation_errors_seen") or []
-            if errs:
-                lines.append("")
-                lines.append(f"Validation errors: {len(errs)}")
-                for e in errs:
-                    lines.append(f"  {e.get('question')!r}: {e.get('error')!r}")
-            final_error = journal.get("final_error")
-            if final_error:
-                lines.append("")
-                lines.append(f"Final error: {final_error}")
-        self._detail_view.setPlainText("\n".join(lines))
+            else:
+                lines = [
+                    f"# {len(qs)} question(s) answered\n"
+                    "# source: hard-rule | 485-alias | claude | fallback\n"
+                ]
+                for q in qs:
+                    lines.append(
+                        f"Q: {q.get('question', '').strip()}\n"
+                        f"A: {q.get('answer', '').strip()}\n"
+                        f"   source={q.get('source', '?')}\n"
+                    )
+                    opts = q.get("options")
+                    if opts:
+                        lines.append(
+                            "   options:\n" +
+                            "\n".join(f"   - {o}" for o in opts) +
+                            "\n"
+                        )
+                self._qa_view.setPlainText("\n".join(lines))
+
+        # Raw view: row + journal.
+        raw = {
+            "db_row": row,
+            "journal": journal,
+        }
+        self._raw_view.setPlainText(json.dumps(raw, indent=2, default=str))
+
+    def _reset_detail(self) -> None:
+        self._header_label.setText("Select a row to see details.")
+        self._meta_label.setText("")
+        self._cover_view.clear()
+        self._qa_view.clear()
+        self._raw_view.clear()
 
     def _find_journal(self, url: str | None) -> dict | None:
         if url is None or not self._journal_path.exists():
             return None
-        # Read backwards for the most recent entry with this URL.
         try:
             with open(self._journal_path) as f:
                 lines = f.readlines()
@@ -212,6 +305,13 @@ def _h1() -> QFont:
 
 def _h2() -> QFont:
     f = QFont()
-    f.setPointSize(13)
+    f.setPointSize(14)
     f.setBold(True)
     return f
+
+
+def _text_view_css() -> str:
+    return (
+        "QPlainTextEdit { background: #f8fafc; color: #111827; "
+        "font-family: 'SF Mono', Consolas, monospace; font-size: 12px; }"
+    )

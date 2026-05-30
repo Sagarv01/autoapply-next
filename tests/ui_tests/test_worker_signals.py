@@ -120,7 +120,9 @@ def test_worker_emits_progress_then_finished(qtbot, workdir, fake_apply):
         assert len(finished_results) == 1
         assert finished_results[0].status == ApplicationStatus.DRY_RUN_VERIFIED
         assert "running" in states
-        assert "idle" in states
+        # state_changed("idle") is emitted from the worker thread after
+        # finished; queued slots may not have run yet. Wait for it.
+        qtbot.waitUntil(lambda: "idle" in states, timeout=2000)
     finally:
         worker.stop_loop()
 

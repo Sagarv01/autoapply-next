@@ -78,6 +78,12 @@ class RunScreen(QWidget):
 
     # ------------------------------------------------------------- widgets
 
+    def set_url(self, url: str) -> None:
+        """Public: called by MainWindow when the Queue requests a run."""
+        if url:
+            self._url_input.setText(url)
+            self._settings.selected_job_url = url
+
     def _build_url_row(self) -> QWidget:
         wrap = QFrame()
         wrap.setObjectName("url-row")

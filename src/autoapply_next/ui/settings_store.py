@@ -26,11 +26,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, object] = {
     "allow_real_submit": False,
-    "match_threshold": 20,
+    # 50 was chosen as the self-use default after the first capstone run.
+    # The engine's daemon historically used 20, which works for an unattended
+    # auto-applier but is too low for interactive review (most scraped jobs
+    # in the 20 to 49 band were skim-able weak matches). At 50 the queue is
+    # short enough to review by eye and most rows are worth opening the JD.
+    # The setting is exposed in the Settings screen so the user can tune it.
+    "match_threshold": 50,
     "daily_cap": 30,
     "operating_hours_start": "07:00",
     "operating_hours_end": "23:00",
     "selected_job_url": None,
+    "last_scrape_keyword": "",
 }
 
 
@@ -104,6 +111,19 @@ class SettingsStore(QObject):
         self._save()
         if value:
             self.selected_job_url_changed.emit(value)
+
+    @property
+    def last_scrape_keyword(self) -> str:
+        v = self._data.get("last_scrape_keyword", "")
+        return v if isinstance(v, str) else ""
+
+    @last_scrape_keyword.setter
+    def last_scrape_keyword(self, value: str) -> None:
+        value = str(value)
+        if value == self.last_scrape_keyword:
+            return
+        self._data["last_scrape_keyword"] = value
+        self._save()
 
     # --------------------------------------------------------------- io
 

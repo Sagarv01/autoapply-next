@@ -68,15 +68,24 @@ class MainWindow(QMainWindow):
         # Screens.
         self._stack = QStackedWidget(self)
         self._signin = SignInScreen()
-        self._session = SessionSetupScreen(engine_workdir=engine_workdir)
+        self._session = SessionSetupScreen(
+            engine_workdir=engine_workdir, worker=self._worker
+        )
         self._profile = ProfileScreen(engine_workdir=engine_workdir)
-        self._queue = QueueScreen(engine_workdir=engine_workdir)
+        self._queue = QueueScreen(
+            engine_workdir=engine_workdir,
+            worker=self._worker,
+            settings=self._settings,
+        )
         self._run = RunScreen(
             worker=self._worker,
             settings=self._settings,
         )
         self._results = ResultsScreen(engine_workdir=engine_workdir)
         self._settings_screen = SettingsScreen(settings=self._settings)
+
+        # Wire Queue -> Run handoff: selecting a row swaps to Run with URL preloaded.
+        self._queue.run_requested.connect(self._on_queue_run_requested)
         for screen in [
             self._signin,
             self._session,
@@ -145,6 +154,7 @@ class MainWindow(QMainWindow):
     def _wire_signals(self) -> None:
         self._worker.state_changed.connect(self._on_worker_state)
         self._worker.failed.connect(self._on_worker_failed)
+        self._settings.match_threshold_changed.connect(self._on_threshold_changed)
 
     # -------------------------------------------------------------- navigation
 
@@ -180,6 +190,16 @@ class MainWindow(QMainWindow):
     @Slot(str, str)
     def _on_worker_failed(self, job_url: str, message: str) -> None:
         QMessageBox.warning(self, "Engine error", f"{job_url}\n\n{message}")
+
+    @Slot(str)
+    def _on_queue_run_requested(self, url: str) -> None:
+        self._run.set_url(url)
+        self._goto(self._run)
+
+    # Also bump the worker's threshold when Settings changes.
+    @Slot(int)
+    def _on_threshold_changed(self, value: int) -> None:
+        self._worker.set_match_threshold(value)
 
     # -------------------------------------------------------------- shutdown
 
