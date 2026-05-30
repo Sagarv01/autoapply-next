@@ -12,50 +12,66 @@ in-process over a webview-plus-sidecar architecture is in ADR-0002. The
 reason the engine source is vendored unmodified, and why anything under
 `vendor/` is off-limits to edits, is in ADR-0001.
 
-## Status (2026-05-29)
+## Status (2026-05-30)
 
-What is working today:
+What is working today (dogfood-ready on macOS):
 
-- Safety gate (`src/autoapply_next/engine/safety.py`) with 9 contract tests
-  in `tests/contract/test_safety_gate.py`. The gate monkey-patches
-  `seek_apply._submit` at runtime and substitutes a dry-run path that ticks
-  the terms checkbox, asserts the submit button is visible and enabled,
-  takes a full-page screenshot, then raises `DryRunReached`. Real submit is
-  only reached when `allow_real_submit=True`.
-- PII scrubber with 14 contract tests in
-  `tests/contract/test_pii_scrubber.py`. Redacts the candidate's name,
-  email, phone, and Seek URLs from log output before logs hit disk or
-  Sentry.
-- Qt worker threading model from ADR-0003: an `EngineWorker(QObject)`
-  pinned to a `QThread`, owning its own asyncio loop, communicating with the
-  GUI via Qt signals (`started`, `progress`, `finished`, `failed`) and a
-  cooperative cancellation path. 4 pytest-qt tests in
-  `tests/ui_tests/test_worker_signals.py` cover signal emission, queued
-  cross-thread invocation, and `asyncio.Task.cancel()` teardown.
-- End-to-end live-Seek dry-run integration test
+- **Safety gate** (`src/autoapply_next/engine/safety.py`) with 9 contract tests.
+  Monkey-patches `seek_apply._submit` at runtime, substitutes a dry-run path
+  that ticks the terms checkbox, asserts the submit button is visible and
+  enabled, takes a full-page screenshot, then raises `DryRunReached`. Real
+  submit only reached when `allow_real_submit=True`.
+- **PII scrubber** (14 contract tests). Redacts JWTs, API keys, emails, AU
+  phone numbers, cookies, query-string secrets, long base64 blobs before
+  logs hit disk.
+- **Qt worker threading model** from ADR-0003: `EngineWorker(QObject)` owns
+  its own Python thread + asyncio loop. Communicates with the GUI via Qt
+  signals (`state_changed`, `progress`, `finished`, `failed`, `log`,
+  `session_finished`, `scrape_finished`). 4 pytest-qt tests cover signal
+  routing, re-entrancy rejection, and `asyncio.Task.cancel()` teardown.
+- **In-app Seek session bootstrap** (Slice 2,
+  `src/autoapply_next/engine/session_bootstrap.py`). The button launches
+  Chromium against `sessions/seek_chrome_profile/`, the user logs in
+  manually, browser close triggers a headless verify probe. 5 pytest-qt
+  tests for the four state outcomes (`VALID`, `INVALID`, `ABANDONED`,
+  `CANCELLED`) plus the busy-worker rejection path.
+- **Scraper wiring in Queue** (Slice 4,
+  `src/autoapply_next/engine/scraping.py`). Type a keyword, click Scrape
+  and score, the worker drives `SeekScraper` for one keyword, scores each
+  new listing via `matcher.score_job`, persists into `applications` with
+  `status="queued"`. Dedupe is against the `applications` table only, not
+  `seen_jobs`, so jobs the engine's daemon scraped but never recorded are
+  re-scoreable from the GUI. 3 pytest-qt tests.
+- **Results screen renders cover letter + screening Q&A.** The adapter
+  writes a `<cover_pdf>.txt` sidecar alongside the generated cover-letter
+  PDF; the Results screen reads it back. The Q&A tab reads
+  `errors/applications.jsonl` for the per-job journal. Both are surfaced
+  verbatim so the user can review what would go out under their name before
+  ever flipping `ALLOW_REAL_SUBMIT`.
+- **Queue picks a job, hands it to Run.** `QueueScreen.run_requested`
+  Qt-signals up to `MainWindow`, which calls `RunScreen.set_url(url)` and
+  switches the stacked widget. The self-use loop is now contiguous: set up
+  session, scrape and score, review and pick from the queue, run in
+  dry-run, review cover letter + Q&A in Results.
+- **Default `match_threshold` is now 50** (was 20). 20 was the engine's
+  daemon default and was right for unattended applying; for interactive
+  review it floods the queue with weak matches. 50 keeps the queue
+  reviewable. Tunable in Settings.
+- **End-to-end live-Seek dry-run** integration test
   (`tests/integration/test_live_seek_dryrun.py`, marker
-  `requires_live_seek`) that drives peek to score to tailor to apply to
-  gate to screenshot against a real Seek quick-apply listing. Verified
-  2026-05-29 at 238 seconds wall-clock; the run log is in
-  `docs/test-log.md`.
+  `requires_live_seek`). Verified 2026-05-29 at 238 seconds.
+- **Capstone self-use loop test**
+  (`tests/integration/test_capstone_self_use_loop.py`). Scrapes Seek for
+  a real keyword, picks the highest-scored quick-apply job, runs
+  `apply_to_job` end to end, asserts the cover-letter sidecar exists and
+  the journal recorded any screening answers. Verified 2026-05-30 at 488
+  seconds. Run log in `docs/test-log.md`.
 
-What is unfinished:
+What is unfinished (deferred, not regressed):
 
 - The Supabase sign-in screen
-  (`src/autoapply_next/ui/signin_screen.py`) renders, but the sign-in
-  button is currently a Skip placeholder. The Supabase SDK is in
-  `pyproject.toml`; the auth flow itself is not wired up. Out-of-scope for
-  the slice that ships the dry-run.
-- The in-app Seek session bootstrap
-  (`src/autoapply_next/ui/session_setup_screen.py`) currently directs the
-  user to run the engine's CLI script to populate the persistent Chrome
-  user-data-dir. The button-driven flow that opens Chromium, prompts for
-  manual login including OTP, then closes the browser, is not yet
-  implemented.
-- The scraper is not wired into the Queue screen
-  (`src/autoapply_next/ui/queue_screen.py`). The screen renders the layout
-  but does not yet call the engine's job-board scraper to populate rows;
-  job URLs are currently entered manually.
+  (`src/autoapply_next/ui/signin_screen.py`) renders but is a Skip
+  placeholder. Out of scope for the dogfood milestone.
 - Code-signing identities and secrets. The signing scripts
   (`packaging/macos/sign-notarize.sh` and `packaging/windows/sign.ps1`)
   exist, the CI workflow at `.github/workflows/release.yml` references the
