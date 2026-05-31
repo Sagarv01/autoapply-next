@@ -97,13 +97,19 @@ def stub_batch(monkeypatch):
 
     async def fake_run(*, job_urls, engine_workdir, allow_real_submit,
                        on_progress, is_cancelled, is_stopped,
-                       throttle_seconds=0):
+                       throttle_range_seconds=(0, 0), tally=None, **_kw):
+        # Updated for D's Contract 5: run_batch now takes throttle_range_seconds
+        # (tuple) instead of throttle_seconds (int) AND accepts a caller-owned
+        # tally that is mutated in place (E's worker uses this). The stub also
+        # accepts **_kw so new optional kwargs (fatal_classifier, daily_cap,
+        # etc.) don't break the recording.
         recorded["run_calls"].append({
             "urls": list(job_urls),
             "allow_real_submit": bool(allow_real_submit),
-            "throttle_seconds": int(throttle_seconds),
+            "throttle_range_seconds": tuple(throttle_range_seconds),
         })
-        tally = BatchRunResult()
+        if tally is None:
+            tally = BatchRunResult()
         for i, url in enumerate(job_urls, 1):
             if is_stopped():
                 tally.stop_reason = "user_stop"
@@ -274,8 +280,11 @@ def test_stop_halts_batch_between_jobs(
 
     async def slow_run(*, job_urls, engine_workdir, allow_real_submit,
                        on_progress, is_cancelled, is_stopped,
-                       throttle_seconds=0):
-        tally = BatchRunResult()
+                       throttle_range_seconds=(0, 0), tally=None, **_kw):
+        # Updated for D's Contract 5: tally is owned by the caller and
+        # mutated in place; throttle is a (min, max) tuple now.
+        if tally is None:
+            tally = BatchRunResult()
         for i, url in enumerate(job_urls, 1):
             if is_stopped():
                 tally.stop_reason = "user_stop"
@@ -355,7 +364,11 @@ def test_failed_and_not_quick_apply_rows_tallied_and_not_retried(
             on_progress=None,
             is_cancelled=lambda: False,
             is_stopped=lambda: False,
-            throttle_seconds=0,
+            throttle_range_seconds=(0, 0),
+            # Disable D's consecutive-failure circuit breaker so this test
+            # can pin the "every URL attempted once" contract (3 failures
+            # in a row would otherwise halt mid-batch).
+            max_consecutive_failures=999,
         )
 
     tally = asyncio.run(run())

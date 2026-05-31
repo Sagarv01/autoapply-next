@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from .adapter import _engine_workdir
+from .persistence import permafailed_urls
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,14 @@ def _has_application_row(tracker_mod, url: str) -> bool:
     """Check if the engine's `applications` table already has a row for this
     URL. tracker.is_applied_or_skipped only matches status in ('applied',
     'skipped'), which would let 'queued', 'failed', 'in_progress' through.
-    For dedupe in the interactive queue we want any existing row to count."""
+    For dedupe in the interactive queue we want any existing row to count.
+
+    Note on permafailed rows: any URL whose `failure_count` has reached
+    PERMAFAIL_THRESHOLD is by definition already represented by a row in
+    `applications` (that's how the failure_count got there), so this
+    check ALREADY excludes them implicitly. The `_is_permafailed` helper
+    below makes that exclusion explicit and testable in isolation.
+    """
     try:
         import sqlite3
 
@@ -48,6 +56,20 @@ def _has_application_row(tracker_mod, url: str) -> bool:
                 "SELECT 1 FROM applications WHERE url=?", (url,)
             )
             return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _is_permafailed(engine_workdir: Path, url: str) -> bool:
+    """Belt-and-braces permafail exclusion for the scrape dedup path.
+
+    `_has_application_row` already excludes permafailed URLs (they
+    necessarily have a row in `applications`). This helper exists so the
+    permafail behavior is explicitly named at the call site and unit-
+    testable in isolation via `persistence.permafailed_urls`.
+    """
+    try:
+        return url in permafailed_urls(engine_workdir)
     except Exception:
         return False
 
@@ -165,6 +187,12 @@ async def scrape_and_score(
             for j in raw:
                 if is_cancelled():
                     raise asyncio.CancelledError()
+                # Permafailed rows are already excluded by the next check
+                # (they always have an applications row), but call the
+                # explicit helper first so the exclusion reason is named.
+                if _is_permafailed(engine_workdir, j.url):
+                    already_in_queue.add(j.url)
+                    continue
                 if _has_application_row(tracker, j.url):
                     already_in_queue.add(j.url)
                     continue

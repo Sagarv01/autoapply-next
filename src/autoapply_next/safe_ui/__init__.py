@@ -23,8 +23,10 @@ process, surfaces visibly with a readable message.
 
 from .error_handler import (
     ErrorBus,
+    ErrorCoalescer,
     confirm_dialog,
     get_bus,
+    get_coalescer,
     install_global_handlers,
     safe_slot,
     show_error_dialog,
@@ -32,8 +34,10 @@ from .error_handler import (
 
 __all__ = [
     "ErrorBus",
+    "ErrorCoalescer",
     "confirm_dialog",
     "get_bus",
+    "get_coalescer",
     "install_global_handlers",
     "safe_slot",
     "show_error_dialog",

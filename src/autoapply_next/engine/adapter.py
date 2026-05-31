@@ -59,17 +59,30 @@ import logging
 import os
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Awaitable, Callable
 
 from .hooks import EngineHooks
-from .persistence import persist_apply_outcome
+from .persistence import (
+    PersistResult,
+    is_fatal_condition,
+    persist_apply_outcome,
+    persist_in_progress,
+)
 from .progress import ProgressEvent, ProgressStage
 from .results import ApplicationResult, ApplicationStatus
 from .safety import DryRunReached, SafetyGate
 from .verifier import RobustVerifier, VerifyOutcome
 
 logger = logging.getLogger(__name__)
+
+
+# Mirror vendor/job-finder/main.py:_apply_with_retry constants. Pre-submit
+# only: PEEK / SCORE / TAILOR are retried; APPLY is one-shot per the hard
+# constraint (never auto-retry a real submit).
+MAX_RETRIES = 3
+RETRY_DELAY = 30  # seconds, multiplied by attempt number (30, 60, 90)
 
 
 ProgressCallback = Callable[[ProgressEvent], None]
@@ -226,6 +239,131 @@ def _title_from_url(url: str) -> str:
         return "Seek listing"
 
 
+def _persist_and_check(
+    result: ApplicationResult, engine_workdir: Path
+) -> ApplicationResult:
+    """Persist `result` and inspect PersistResult.written.
+
+    On a write failure for a SUBMITTED result, downgrade in-memory status
+    to SUBMITTED_UNCERTAIN (the engine submitted; we just lost the DB
+    write so we cannot trust subsequent eligibility). On a write failure
+    for any other status, leave the status alone but append a "Persist
+    failed:" prefix to error_message so the user sees the loss.
+
+    Either branch logs an ERROR. The caller returns the (possibly
+    rewritten) result verbatim.
+    """
+    pr = persist_apply_outcome(engine_workdir=engine_workdir, result=result)
+    if not pr.written and pr.error:
+        logger.error(
+            "Persist write failure for %s (status=%s): %s",
+            result.job_url,
+            result.status.value,
+            pr.error,
+        )
+        if result.status == ApplicationStatus.SUBMITTED:
+            return replace(
+                result,
+                status=ApplicationStatus.SUBMITTED_UNCERTAIN,
+                error_message=f"Persist failed: {pr.error}",
+            )
+        prev = result.error_message or ""
+        sep = "\n" if prev else ""
+        return replace(
+            result,
+            error_message=f"{prev}{sep}Persist failed: {pr.error}",
+        )
+    return result
+
+
+async def _bounded_retry(
+    stage: str,
+    op: "Callable[[], Awaitable]",
+    *,
+    is_cancelled: Callable[[], bool],
+    non_retryable: tuple[type[BaseException], ...] = (),
+) -> "tuple[bool, object | None, Exception | None]":
+    """Run `op` up to MAX_RETRIES times with exponential backoff.
+
+    Returns a 3-tuple: (success, value, last_exception).
+    - On success: (True, return_value_of_op, None).
+    - On exhaustion or refusal-to-retry: (False, None, last_exception).
+
+    Refuses to retry when:
+      - The exception is an instance of any class in `non_retryable`
+        (structural error; same input would produce the same output).
+      - `is_fatal_condition` classifies the exception as fatal
+        (session expired / CAPTCHA / rate limit). The classifier match
+        is attached to the returned exception so the caller can surface
+        the reason verbatim.
+
+    Honors `is_cancelled()` during the inter-attempt sleep so a STOP click
+    does not stall by RETRY_DELAY * attempt seconds. asyncio.CancelledError
+    is allowed to propagate; it is never caught as a retryable failure.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            value = await op()
+            return True, value, None
+        except asyncio.CancelledError:
+            raise
+        except non_retryable as exc:
+            logger.info(
+                "%s: non-retryable %s; not retrying",
+                stage,
+                type(exc).__name__,
+            )
+            return False, None, exc
+        except Exception as exc:
+            last_exc = exc
+            fatal_reason = is_fatal_condition(
+                exception_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            if fatal_reason:
+                logger.error(
+                    "%s: fatal condition (%s); refusing retry",
+                    stage,
+                    fatal_reason,
+                )
+                # Annotate so the caller can include the fatal reason in
+                # error_message without re-running the classifier.
+                setattr(exc, "_fatal_reason", fatal_reason)
+                return False, None, exc
+            if attempt >= MAX_RETRIES:
+                logger.error(
+                    "%s: all %d attempts failed; last_error=%s: %s",
+                    stage,
+                    MAX_RETRIES,
+                    type(exc).__name__,
+                    exc,
+                )
+                return False, None, exc
+            wait = RETRY_DELAY * attempt
+            logger.warning(
+                "%s: attempt %d/%d failed (%s: %s); retrying in %ds",
+                stage,
+                attempt,
+                MAX_RETRIES,
+                type(exc).__name__,
+                exc,
+                wait,
+            )
+            # Honor cancellation during the backoff. Sleep in 1s chunks so
+            # the STOP latency is bounded regardless of RETRY_DELAY size.
+            slept = 0
+            while slept < wait:
+                if is_cancelled():
+                    raise asyncio.CancelledError(
+                        f"Cancelled during {stage} retry backoff"
+                    )
+                step = min(1, wait - slept)
+                await asyncio.sleep(step)
+                slept += step
+    return False, None, last_exc
+
+
 async def apply_to_job(
     *,
     job_url: str,
@@ -275,7 +413,7 @@ async def apply_to_job(
                     screenshot_dir=screenshot_dir,
                 ), \
                 RobustVerifier() as verifier:
-                # ---------- PEEK + listing fetch ----------
+                # ---------- PEEK + listing fetch (retried) ----------
                 check_cancel("peek")
                 progress(
                     ProgressEvent(
@@ -284,16 +422,31 @@ async def apply_to_job(
                     )
                 )
                 t0 = time.monotonic()
-                try:
-                    job, is_quick = await _peek_and_fetch_listing(job_url)
-                except Exception as exc:
+
+                async def _peek_op():
+                    return await _peek_and_fetch_listing(job_url)
+
+                ok, value, exc = await _bounded_retry(
+                    "peek",
+                    _peek_op,
+                    is_cancelled=cancelled,
+                    # JobNotQuickApplyError is structural; we never raise it
+                    # from _peek_and_fetch_listing, but the is_quick check
+                    # below is structural too and does not run through the
+                    # retry helper. Network errors flow through here.
+                    non_retryable=(),
+                )
+                if not ok:
                     return _failure(
                         job_url, "peek", exc, progress,
                         engine_workdir=engine_workdir,
                     )
+                job, is_quick = value
                 logger.info("peek took %.1fs", time.monotonic() - t0)
 
                 if not is_quick:
+                    # Structural; not retryable. Raising JobNotQuickApplyError
+                    # so persistence maps it to 'skipped' via map_status.
                     err = JobNotQuickApplyError(
                         f"Job is not a Seek quick-apply listing: {job_url}"
                     )
@@ -302,21 +455,32 @@ async def apply_to_job(
                         engine_workdir=engine_workdir,
                     )
 
-                # ---------- SCORE ----------
+                # ---------- SCORE (retried) ----------
                 check_cancel("score")
                 progress(
                     ProgressEvent(
                         stage=ProgressStage.SCORE, message="Scoring match"
                     )
                 )
-                try:
-                    score, reasoning = await matcher.score_job(job)
-                except Exception as exc:
+
+                async def _score_op():
+                    return await matcher.score_job(job)
+
+                ok, value, exc = await _bounded_retry(
+                    "score",
+                    _score_op,
+                    is_cancelled=cancelled,
+                    # Score is a transient-LLM call; nothing structural to
+                    # exclude. CoverLetterQualityError is tailor-only.
+                    non_retryable=(),
+                )
+                if not ok:
                     return _failure(
                         job_url, "score", exc, progress,
                         engine_workdir=engine_workdir,
                         score=None,
                     )
+                score, reasoning = value
                 progress(
                     ProgressEvent(
                         stage=ProgressStage.SCORE,
@@ -337,13 +501,9 @@ async def apply_to_job(
                         score=score,
                         reasoning=reasoning,
                     )
-                    persist_apply_outcome(
-                        engine_workdir=engine_workdir,
-                        result=skipped_result,
-                    )
-                    return skipped_result
+                    return _persist_and_check(skipped_result, engine_workdir)
 
-                # ---------- TAILOR ----------
+                # ---------- TAILOR (retried, but not on CoverLetterQualityError) ----------
                 check_cancel("tailor")
                 progress(
                     ProgressEvent(
@@ -351,11 +511,28 @@ async def apply_to_job(
                         message="Generating tailored resume + cover letter",
                     )
                 )
-                try:
-                    resume_pdf, cover_pdf = await tailorer.tailor(
-                        job, tier="full"
-                    )
-                except Exception as exc:
+
+                # CoverLetterQualityError is structural: the same JD will
+                # produce the same Claude refusal. Treat it like
+                # job-finder's per-job catch (which marks the row 'skipped'
+                # and does NOT retry).
+                non_retryable_tailor: tuple[type[BaseException], ...] = ()
+                tailor_quality_exc = getattr(
+                    tailorer, "CoverLetterQualityError", None
+                )
+                if isinstance(tailor_quality_exc, type):
+                    non_retryable_tailor = (tailor_quality_exc,)
+
+                async def _tailor_op():
+                    return await tailorer.tailor(job, tier="full")
+
+                ok, value, exc = await _bounded_retry(
+                    "tailor",
+                    _tailor_op,
+                    is_cancelled=cancelled,
+                    non_retryable=non_retryable_tailor,
+                )
+                if not ok:
                     return _failure(
                         job_url,
                         "tailor",
@@ -365,6 +542,8 @@ async def apply_to_job(
                         score=score,
                         reasoning=reasoning,
                     )
+                resume_pdf, cover_pdf = value
+
                 # Persist the captured cover-letter text alongside the PDF so
                 # the Results screen can render it later without re-running
                 # Claude. The file is `<cover_pdf>.txt`. Failure here is not
@@ -391,7 +570,14 @@ async def apply_to_job(
                     )
                 )
 
-                # ---------- APPLY ----------
+                # ---------- APPLY (NOT retried) ----------
+                # Submit + verify is one-shot per the hard constraint:
+                # never auto-retry submit. We mark the row 'in_progress'
+                # only on the real-submit path so that a crash mid-apply
+                # is recoverable by Workstream A's recover_orphans. Dry-run
+                # must not leave the row 'in_progress' (Workstream A would
+                # then force-fail it on next startup, which is wrong since
+                # nothing happened on Seek).
                 check_cancel("apply")
                 progress(
                     ProgressEvent(
@@ -403,6 +589,24 @@ async def apply_to_job(
                         ),
                     )
                 )
+                if allow_real_submit:
+                    in_progress_pr = persist_in_progress(
+                        engine_workdir=engine_workdir,
+                        url=job_url,
+                        title=job.title,
+                        company=job.company,
+                        score=score,
+                    )
+                    if not in_progress_pr.written and in_progress_pr.error:
+                        # Loud log but do not abort: the orphan-recovery
+                        # safety net is degraded if this fails, but the
+                        # apply itself can still run.
+                        logger.error(
+                            "persist_in_progress failed for %s: %s",
+                            job_url,
+                            in_progress_pr.error,
+                        )
+
                 # candidate dict comes from config.yaml.
                 candidate = _load_candidate(engine_workdir / "config.yaml")
                 try:
@@ -463,12 +667,12 @@ async def apply_to_job(
                     )
                     # Persist BEFORE returning, so a downstream signal
                     # handler crashing or a STOP click between jobs in a
-                    # batch can never lose what already went out.
-                    persist_apply_outcome(
-                        engine_workdir=engine_workdir,
-                        result=final_result,
-                    )
-                    return final_result
+                    # batch can never lose what already went out. If the
+                    # write fails on a SUBMITTED, the helper downgrades to
+                    # SUBMITTED_UNCERTAIN: the engine submitted; we just
+                    # lost the DB write so subsequent eligibility cannot
+                    # be trusted.
+                    return _persist_and_check(final_result, engine_workdir)
                 except DryRunReached as dry:
                     hooks.read_last_journal()
                     progress(
@@ -528,7 +732,7 @@ async def apply_to_job(
 def _failure(
     job_url: str,
     stage: str,
-    exc: Exception,
+    exc: Exception | None,
     progress: ProgressCallback,
     *,
     engine_workdir: Path | None = None,
@@ -541,6 +745,19 @@ def _failure(
     verify_outcome: str | None = None,
     verify_detail: str | None = None,
 ) -> ApplicationResult:
+    # exc may be None if the retry helper returned a non-success without an
+    # exception (defensive; not expected to happen in practice).
+    if exc is None:
+        exc = RuntimeError(f"{stage} failed with no exception captured")
+
+    # If the retry helper annotated this exception with a fatal reason from
+    # is_fatal_condition, prepend it to the error message so the batch
+    # circuit breaker / the user see it verbatim.
+    fatal_reason = getattr(exc, "_fatal_reason", None)
+    error_message = str(exc)
+    if fatal_reason:
+        error_message = f"[fatal:{fatal_reason}] {error_message}"
+
     msg = f"{stage} failed: {type(exc).__name__}: {exc}"
     progress(
         ProgressEvent(
@@ -551,10 +768,11 @@ def _failure(
                 "exception_type": type(exc).__name__,
                 "exception_message": str(exc),
                 "stage": stage,
+                "fatal_reason": fatal_reason,
             },
         )
     )
-    logger.exception("apply_to_job failed at stage=%s", stage)
+    logger.error("apply_to_job failed at stage=%s: %s", stage, error_message)
     failure_result = ApplicationResult(
         job_url=job_url,
         status=ApplicationStatus.FAILED,
@@ -564,7 +782,7 @@ def _failure(
         cover_pdf=cover_pdf,
         cover_letter_text=cover_letter_text,
         screening_answers=screening_answers,
-        error_message=str(exc),
+        error_message=error_message,
         exception_type=type(exc).__name__,
         verify_outcome=verify_outcome,
         verify_detail=verify_detail,
@@ -572,12 +790,10 @@ def _failure(
     # Persist immediately: a FAILED result with verify NOT_APPLIED becomes
     # 'failed' in jobs.db; a peek-stage JobNotQuickApplyError becomes
     # 'skipped'. Either way, the row is no longer eligible for an auto
-    # batch prepare to pick up again.
+    # batch prepare to pick up again. Run through the helper so a persist
+    # write failure surfaces a "Persist failed:" prefix in error_message.
     if engine_workdir is not None:
-        persist_apply_outcome(
-            engine_workdir=engine_workdir,
-            result=failure_result,
-        )
+        failure_result = _persist_and_check(failure_result, engine_workdir)
     return failure_result
 
 

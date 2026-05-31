@@ -12,10 +12,11 @@ review pane in the BatchScreen reads that. Each job becomes a
 Phase 2 (`run_batch`): for each URL in the approved subset (whatever
 the user ticked in the UI), call `apply_to_job` again, this time with
 `allow_real_submit` set to whatever the user chose at the
-batch-confirmation step. Throttle between jobs. Track running tally.
-Stop between jobs if `is_stopped()` returns True (graceful STOP). Hard
-cancel (current job dies in flight, `asyncio.CancelledError`) is what
-`is_cancelled()` is for, mirroring the single-job semantics.
+batch-confirmation step. Throttle between jobs with a per-apply random
+gap mirroring job-finder's `APPLY_GAP_MIN`/`APPLY_GAP_MAX`. Track running
+tally. Stop between jobs if `is_stopped()` returns True (graceful STOP).
+Hard cancel (current job dies in flight, `asyncio.CancelledError`) is
+what `is_cancelled()` is for, mirroring the single-job semantics.
 
 # Why no auto-retry
 
@@ -26,6 +27,29 @@ goes out under the user's name is much worse than an honest miss. The
 batch tally counts each failure once; the next run respects whatever
 status the engine wrote into `jobs.db` (already-applied URLs would
 self-skip on next prepare).
+
+# Circuit breaker
+
+The runner also enforces two halt conditions that the original engine
+implements in its outer loop and that we mirror here:
+
+* `fatal_classifier`: a per-result hook (wired to
+  `persistence.is_fatal_condition` by the worker). If a per-job FAILED
+  result is classified as fatal (Seek session expired, captcha, rate
+  limit, missing session bootstrap), we set
+  `tally.stop_reason = "fatal:<reason>"`, log a critical line, and
+  return. Remaining URLs are left untouched in `jobs.db` so the user
+  can resume after fixing the root cause.
+* `max_consecutive_failures` (default 3): if N back-to-back per-job
+  results come back FAILED (and not fatal), we set
+  `tally.stop_reason = "consecutive_failures"` and return. The
+  consecutive counter resets on any non-FAILED result.
+
+A `daily_cap` (default 0 = no cap) bounds how many submissions a single
+batch can produce. The worker passes the current day's already-applied
+count via `today_count_fn`; once `today_count + this_batch_submissions`
+hits the cap, we set `tally.stop_reason = "daily_cap_reached"` and
+return.
 
 # Engine source untouched
 
@@ -38,6 +62,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -87,7 +112,9 @@ class BatchPreparedJob:
 @dataclass
 class BatchRunResult:
     """Final tally from a run. Updated incrementally via on_progress; the
-    full object is returned at the end."""
+    full object is returned at the end. Callers MAY construct one and pass
+    it into `run_batch` via the `tally` kwarg so they hold a live reference
+    even if the coroutine is cancelled mid-iteration."""
 
     submitted: int = 0
     """Engine returned ApplicationStatus.SUBMITTED. The robust verifier
@@ -106,13 +133,29 @@ class BatchRunResult:
     cancelled: int = 0
     per_job: list[ApplicationResult] = field(default_factory=list)
     stop_reason: str = "completed"
-    """'completed' | 'user_stop' | 'cancelled'"""
+    """One of: 'completed' | 'user_stop' | 'cancelled' |
+    'fatal:<reason>' | 'consecutive_failures' | 'daily_cap_reached'."""
+    consecutive_failures: int = 0
+    """The number of back-to-back FAILED results observed at the moment
+    the runner exited (0 unless `stop_reason == "consecutive_failures"`
+    or a final FAILED hit the cap)."""
+    fatal_reason: str | None = None
+    """When `stop_reason` starts with 'fatal:', the short reason string
+    returned by the classifier. None otherwise."""
 
 
 PrepareProgress = Callable[[int, int, BatchPreparedJob], None]
 RunProgress = Callable[[int, int, ApplicationResult], None]
 CancelCheck = Callable[[], bool]
 StopCheck = Callable[[], bool]
+FatalClassifier = Callable[..., "str | None"]
+"""Kwarg-only call shape: `exception_type=..., error_message=...`.
+Matches `persistence.is_fatal_condition`."""
+TodayCountFn = Callable[[], int]
+"""Returns the number of SUBMITTED/SUBMITTED_UNCERTAIN rows already
+written to jobs.db for the current day, before this batch ran. Lets the
+runner enforce a daily cap without coupling to the persistence layer's
+SQL shape (and lets tests inject a stub without mocking datetime)."""
 
 
 # ----------------------------------------------------------------------------- DB read
@@ -281,12 +324,46 @@ async def run_batch(
     on_progress: RunProgress | None = None,
     is_cancelled: CancelCheck | None = None,
     is_stopped: StopCheck | None = None,
-    throttle_seconds: int = 20,
+    throttle_range_seconds: tuple[int, int] = (60, 120),
+    tally: BatchRunResult | None = None,
+    fatal_classifier: FatalClassifier | None = None,
+    max_consecutive_failures: int = 3,
+    daily_cap: int = 0,
+    today_count_fn: TodayCountFn | None = None,
 ) -> BatchRunResult:
     """Iterate `job_urls`, calling `apply_to_job` for each. Throttle, stop
     gracefully, never auto-retry.
 
     Returns a tally. Per-job results are in `per_job` for the UI to render.
+
+    Args:
+      throttle_range_seconds: (min, max) inclusive bounds for the random
+        per-successful-submit pacing gap. Default (60, 120) mirrors
+        job-finder's `APPLY_GAP_MIN`/`APPLY_GAP_MAX`. The worker is
+        responsible for choosing the range; if the user has tuned a
+        single throttle setting it is the worker's job to fan that out
+        into a (min, max) range before calling.
+      tally: optional caller-owned tally object. If provided, mutated in
+        place and returned as-is so the caller retains a live reference
+        even when this coroutine returns mid-iteration (circuit breaker,
+        STOP, cancel). If None, a fresh one is constructed.
+      fatal_classifier: kwarg-only callable matching
+        `persistence.is_fatal_condition(exception_type=, error_message=)`.
+        Called on every FAILED per-job result; if it returns a non-None
+        reason, the runner sets `tally.stop_reason = f"fatal:{reason}"`,
+        logs a critical line, and returns. Remaining URLs are NOT marked
+        failed; they stay 'queued' in jobs.db for resume.
+      max_consecutive_failures: when this many FAILED-non-fatal results
+        land back-to-back the runner halts with
+        `stop_reason="consecutive_failures"`. Reset to 0 on any
+        non-FAILED result.
+      daily_cap: 0 means no cap. When > 0, the runner stops once
+        `today_count_fn() + tally.submitted + tally.submitted_uncertain`
+        reaches `daily_cap`. `stop_reason` is set to
+        `"daily_cap_reached"`.
+      today_count_fn: returns the count of today's already-applied rows
+        in jobs.db. Optional; when None the cap counts only this batch's
+        submissions.
 
     The gate is the same `SafetyGate` the single-job path uses; nothing
     here defaults `allow_real_submit` on, nothing here bypasses the
@@ -300,84 +377,184 @@ async def run_batch(
     is_stopped = is_stopped or (lambda: False)
 
     engine_workdir = Path(engine_workdir).resolve()
-    tally = BatchRunResult()
+    if tally is None:
+        tally = BatchRunResult()
     total = len(job_urls)
+    consecutive_failures = 0
 
-    for i, url in enumerate(job_urls, start=1):
-        # Graceful stop: check BEFORE starting the next job.
-        if is_stopped():
-            tally.stop_reason = "user_stop"
-            return tally
-        if is_cancelled():
-            tally.cancelled += 1
-            tally.stop_reason = "cancelled"
-            return tally
+    try:
+        for i, url in enumerate(job_urls, start=1):
+            # Graceful stop: check BEFORE starting the next job.
+            if is_stopped():
+                tally.stop_reason = "user_stop"
+                return tally
+            if is_cancelled():
+                tally.cancelled += 1
+                tally.stop_reason = "cancelled"
+                return tally
 
+            try:
+                result = await apply_to_job(
+                    job_url=url,
+                    engine_workdir=engine_workdir,
+                    on_progress=None,  # the worker forwards via its own signal
+                    is_cancelled=is_cancelled,
+                    allow_real_submit=allow_real_submit,
+                    match_threshold=0,  # batch threshold already applied at prepare
+                )
+            except asyncio.CancelledError:
+                cancelled = ApplicationResult(
+                    job_url=url, status=ApplicationStatus.CANCELLED,
+                    error_message="Cancelled by user",
+                )
+                tally.cancelled += 1
+                tally.per_job.append(cancelled)
+                on_progress(i, total, cancelled)
+                tally.stop_reason = "cancelled"
+                return tally
+            except Exception as exc:
+                logger.exception("run_batch: unexpected exception")
+                result = ApplicationResult(
+                    job_url=url, status=ApplicationStatus.FAILED,
+                    error_message=f"{type(exc).__name__}: {exc}",
+                    exception_type=type(exc).__name__,
+                )
+
+            # Tally by status.
+            if result.status == ApplicationStatus.SUBMITTED:
+                tally.submitted += 1
+                tally.verified += 1
+            elif result.status == ApplicationStatus.SUBMITTED_UNCERTAIN:
+                tally.submitted_uncertain += 1
+            elif result.status == ApplicationStatus.DRY_RUN_VERIFIED:
+                tally.dry_run_verified += 1
+            elif result.status == ApplicationStatus.SKIPPED_LOW_SCORE:
+                tally.skipped_low_score += 1
+            elif result.status == ApplicationStatus.FAILED:
+                tally.failed += 1
+            elif result.status == ApplicationStatus.CANCELLED:
+                tally.cancelled += 1
+            tally.per_job.append(result)
+            on_progress(i, total, result)
+
+            # Circuit breaker: fatal classifier short-circuits before any
+            # consecutive-failure logic. Remaining URLs stay 'queued' in
+            # jobs.db because we never call apply_to_job for them.
+            if result.status == ApplicationStatus.FAILED:
+                fatal_reason: str | None = None
+                if fatal_classifier is not None:
+                    try:
+                        fatal_reason = fatal_classifier(
+                            exception_type=result.exception_type,
+                            error_message=result.error_message or "",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "run_batch: fatal_classifier raised; "
+                            "treating as non-fatal"
+                        )
+                        fatal_reason = None
+                if fatal_reason:
+                    logger.critical(
+                        "run_batch: fatal condition detected (%s); "
+                        "halting batch. Remaining %d URLs stay queued.",
+                        fatal_reason,
+                        max(0, total - i),
+                    )
+                    tally.fatal_reason = fatal_reason
+                    tally.stop_reason = f"fatal:{fatal_reason}"
+                    tally.consecutive_failures = consecutive_failures + 1
+                    return tally
+                consecutive_failures += 1
+                if consecutive_failures >= max_consecutive_failures:
+                    logger.critical(
+                        "run_batch: %d consecutive non-fatal failures; "
+                        "halting batch. Remaining %d URLs stay queued.",
+                        consecutive_failures,
+                        max(0, total - i),
+                    )
+                    tally.stop_reason = "consecutive_failures"
+                    tally.consecutive_failures = consecutive_failures
+                    return tally
+            else:
+                # Any non-FAILED outcome resets the streak. CANCELLED is
+                # handled above by an early return; we will not reach
+                # here in that case.
+                consecutive_failures = 0
+
+            # Daily cap: count today's pre-existing submissions plus this
+            # batch's. Both SUBMITTED and SUBMITTED_UNCERTAIN count
+            # against the cap because both consume one quick-apply slot
+            # on Seek's side, even if our verifier is unsure.
+            if daily_cap and daily_cap > 0:
+                today_so_far = 0
+                if today_count_fn is not None:
+                    try:
+                        today_so_far = int(today_count_fn() or 0)
+                    except Exception:
+                        logger.exception(
+                            "run_batch: today_count_fn raised; "
+                            "treating as 0"
+                        )
+                        today_so_far = 0
+                in_batch = tally.submitted + tally.submitted_uncertain
+                if today_so_far + in_batch >= daily_cap:
+                    logger.info(
+                        "run_batch: daily_cap reached (%d submissions "
+                        "today, cap=%d). Halting; remaining %d URLs "
+                        "stay queued.",
+                        today_so_far + in_batch,
+                        daily_cap,
+                        max(0, total - i),
+                    )
+                    tally.stop_reason = "daily_cap_reached"
+                    tally.consecutive_failures = consecutive_failures
+                    return tally
+
+            # Throttle between jobs. Last iteration: no need.
+            if i < total:
+                gap = random.uniform(
+                    throttle_range_seconds[0], throttle_range_seconds[1]
+                )
+                await _async_throttle(gap, is_stopped, is_cancelled)
+
+        tally.consecutive_failures = consecutive_failures
+        return tally
+    finally:
+        # Mirror vendor/job-finder/main.py:303 -- release Chromium's
+        # SingletonLock on the seek_chrome_profile so any subsequent
+        # scrape or apply can open the same user-data-dir cleanly.
+        # Wrapped in try/except so a teardown error never masks the real
+        # return value of run_batch.
         try:
-            result = await apply_to_job(
-                job_url=url,
-                engine_workdir=engine_workdir,
-                on_progress=None,  # the worker forwards via its own signal
-                is_cancelled=is_cancelled,
-                allow_real_submit=allow_real_submit,
-                match_threshold=0,  # batch threshold already applied at prepare
-            )
-        except asyncio.CancelledError:
-            cancelled = ApplicationResult(
-                job_url=url, status=ApplicationStatus.CANCELLED,
-                error_message="Cancelled by user",
-            )
-            tally.cancelled += 1
-            tally.per_job.append(cancelled)
-            on_progress(i, total, cancelled)
-            tally.stop_reason = "cancelled"
-            return tally
-        except Exception as exc:
-            logger.exception("run_batch: unexpected exception")
-            failed = ApplicationResult(
-                job_url=url, status=ApplicationStatus.FAILED,
-                error_message=f"{type(exc).__name__}: {exc}",
-                exception_type=type(exc).__name__,
-            )
-            tally.failed += 1
-            tally.per_job.append(failed)
-            on_progress(i, total, failed)
-            # Do NOT auto-retry. Continue to the next job.
-            _maybe_throttle(throttle_seconds, is_stopped, is_cancelled)
-            continue
+            import seek_apply  # type: ignore[import-not-found]
 
-        # Tally by status.
-        if result.status == ApplicationStatus.SUBMITTED:
-            tally.submitted += 1
-            tally.verified += 1
-        elif result.status == ApplicationStatus.SUBMITTED_UNCERTAIN:
-            tally.submitted_uncertain += 1
-        elif result.status == ApplicationStatus.DRY_RUN_VERIFIED:
-            tally.dry_run_verified += 1
-        elif result.status == ApplicationStatus.SKIPPED_LOW_SCORE:
-            tally.skipped_low_score += 1
-        elif result.status == ApplicationStatus.FAILED:
-            tally.failed += 1
-        elif result.status == ApplicationStatus.CANCELLED:
-            tally.cancelled += 1
-        tally.per_job.append(result)
-        on_progress(i, total, result)
-
-        # Throttle between jobs. Last iteration: no need.
-        if i < total:
-            await _async_throttle(
-                throttle_seconds, is_stopped, is_cancelled
+            close = getattr(
+                getattr(seek_apply, "_PeekSession", None), "close", None
             )
-
-    return tally
+            if close is not None:
+                await close()
+        except Exception:
+            logger.warning(
+                "run_batch: _PeekSession.close failed; ignoring",
+                exc_info=True,
+            )
 
 
 async def _async_throttle(
-    seconds: int, is_stopped: StopCheck, is_cancelled: CancelCheck
+    seconds: float, is_stopped: StopCheck, is_cancelled: CancelCheck
 ) -> None:
-    """Sleep ~seconds, checking stop/cancel every second so a STOP click
-    feels immediate to the user."""
-    end = time.monotonic() + max(0, int(seconds))
+    """Sleep `seconds`, checking stop/cancel every second so a STOP click
+    feels immediate to the user. Accepts float seconds so it can carry the
+    randomised gap from `random.uniform`."""
+    target = max(0.0, float(seconds))
+    # Single sleep call when the gap is short enough to be a no-op for the
+    # poll. The job-finder pattern is one sleep per gap; we add the
+    # stop/cancel poll so the GUI's STOP button is responsive.
+    await asyncio.sleep(target if target <= 1.0 else 1.0)
+    if target <= 1.0:
+        return
+    end = time.monotonic() + (target - 1.0)
     while time.monotonic() < end:
         if is_stopped() or is_cancelled():
             return

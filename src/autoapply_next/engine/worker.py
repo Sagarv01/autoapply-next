@@ -341,6 +341,15 @@ class EngineWorker(QObject):
                     is_cancelled=self._cancel_event.is_set,
                     max_jobs=max_jobs,
                 )
+                # SafetyGate regression check: prepare runs with
+                # allow_real_submit=False, so a SUBMITTED status leaking out is
+                # a security regression. Workstream D's _result_to_prepared
+                # records this as a failed row with the sentinel substring
+                # "unexpected status submitted" in error_message (see Contract 5
+                # coordination note in PARALLEL_PLAN.md). If we see any such row,
+                # surface a loud failed signal so the UI pops a critical dialog,
+                # in addition to emitting the prepared list.
+                self._check_for_safety_gate_breach(rows)
                 self.batch_prepare_finished.emit(rows)
             except asyncio.CancelledError:
                 self.batch_prepare_finished.emit([])
@@ -351,6 +360,44 @@ class EngineWorker(QObject):
             self._current_task = None
             self._set_state("idle")
 
+    def _check_for_safety_gate_breach(self, rows) -> None:
+        """Scan prepared rows for the SafetyGate breach sentinel.
+
+        Per Contract 5 coordination, batch._result_to_prepared marks any
+        unexpected status (CANCELLED or SUBMITTED) from a dry-run prepare
+        as status='failed' with error_message containing
+        'unexpected status <value>'. A SUBMITTED leaking through dry-run
+        means the safety gate failed; emit a CRITICAL log and a failed
+        signal with op='SAFETY_GATE_BREACH' so the dialog is loud.
+        """
+        if not rows:
+            return
+        sentinel = "unexpected status submitted"
+        for row in rows:
+            err = getattr(row, "error_message", "") or ""
+            note = getattr(row, "note", "") or ""
+            status = getattr(row, "status", "") or ""
+            haystack = f"{err} {note}".lower()
+            if status == "failed" and sentinel in haystack:
+                url = getattr(row, "url", "<unknown>")
+                logger.critical(
+                    "SAFETY_GATE_BREACH: SUBMITTED leaked through dry-run "
+                    "prepare for url=%s; row.error_message=%s",
+                    url,
+                    err,
+                )
+                self.failed.emit(
+                    "SAFETY_GATE_BREACH",
+                    (
+                        "Safety gate regression: a SUBMITTED status reached "
+                        "the prepare phase, which is supposed to be dry-run "
+                        f"only. URL: {url}. Detail: {err}"
+                    ),
+                )
+                # One emission is enough; the dialog is meant to halt the user
+                # and force them to investigate. Avoid spamming N dialogs.
+                return
+
     async def _batch_run_runner(
         self,
         job_urls: list[str],
@@ -358,6 +405,18 @@ class EngineWorker(QObject):
         throttle_seconds: int,
     ) -> None:
         self._current_task = asyncio.current_task()
+        # Construct the tally up front and hand it to run_batch so we keep a
+        # reference to the live, mutated object. On every exit path (success,
+        # cancel, exception) we emit THIS tally rather than constructing a
+        # zeroed one, preserving the per-job entries that run_batch already
+        # accumulated. See Contract 5 in docs/PARALLEL_PLAN.md.
+        tally = BatchRunResult()
+        # Resilience baseline mirrors job-finder APPLY_GAP_MIN/MAX. Clamp the
+        # lower bound to at least 60s, then upper = lower + 60s. With the
+        # default worker setting of 20, this becomes (60, 120) which is the
+        # spirit of the engine pacing.
+        lower = max(60, int(throttle_seconds))
+        throttle_range = (lower, lower + 60)
         try:
             try:
                 def on_progress(done, total, result):
@@ -367,20 +426,23 @@ class EngineWorker(QObject):
                         msg += f": {result.error_message}"
                     self.log.emit(msg)
 
-                tally = await run_batch(
+                await run_batch(
                     job_urls=job_urls,
                     engine_workdir=self._engine_workdir,
                     allow_real_submit=allow_real_submit,
                     on_progress=on_progress,
                     is_cancelled=self._cancel_event.is_set,
                     is_stopped=self._stop_batch_event.is_set,
-                    throttle_seconds=throttle_seconds,
+                    throttle_range_seconds=throttle_range,
+                    tally=tally,
                 )
                 self.batch_apply_finished.emit(tally)
             except asyncio.CancelledError:
-                # Build a partial tally so the UI is not left blank.
-                partial = BatchRunResult(stop_reason="cancelled")
-                self.batch_apply_finished.emit(partial)
+                # Emit the REAL tally that run_batch was filling in. It already
+                # contains every per-job entry processed before the cancel
+                # propagated, so the UI shows truth, not zeros.
+                tally.stop_reason = "cancelled"
+                self.batch_apply_finished.emit(tally)
             except Exception as exc:
                 logger.exception("EngineWorker: batch_run crashed")
                 self.failed.emit("batch_run", f"{type(exc).__name__}: {exc}")
