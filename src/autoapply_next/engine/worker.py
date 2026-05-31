@@ -50,6 +50,12 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal
 
 from .adapter import EngineNotReadyError, apply_to_job
+from .batch import (
+    BatchPreparedJob,
+    BatchRunResult,
+    prepare_batch,
+    run_batch,
+)
 from .progress import ProgressEvent
 from .results import ApplicationResult, ApplicationStatus
 from .scraping import ScrapeResult, scrape_and_score
@@ -70,6 +76,11 @@ class EngineWorker(QObject):
     log = Signal(str)
     session_finished = Signal(object)
     scrape_finished = Signal(object)
+    # Batch-flow signals. The (int, int, object) shape is (done, total, row).
+    batch_prepare_progress = Signal(int, int, object)
+    batch_prepare_finished = Signal(object)
+    batch_apply_progress = Signal(int, int, object)
+    batch_apply_finished = Signal(object)
 
     def __init__(self, *, engine_workdir: Path, match_threshold: int = 50):
         super().__init__()
@@ -81,6 +92,9 @@ class EngineWorker(QObject):
         self._cancel_event = threading.Event()
         """Cooperative cancellation signal between stages. Set on `cancel()`,
         polled by `apply_to_job` via `is_cancelled=`."""
+        self._stop_batch_event = threading.Event()
+        """Graceful between-job stop signal for `run_batch`. The current
+        job completes; the loop exits before the next one starts."""
         self._current_task: asyncio.Task | None = None
         """The asyncio.Task currently running an operation. Cancel() on this
         propagates `CancelledError` into the engine for in-flight cancellation."""
@@ -144,6 +158,59 @@ class EngineWorker(QObject):
         asyncio.run_coroutine_threadsafe(
             self._scrape_runner(keyword, location), self._loop
         )
+
+    def prepare_batch(self, min_score: int, max_jobs: int = 30) -> None:
+        """Phase 1 of the batch flow: dry-run each queued job at or above
+        `min_score`, build a BatchPreparedJob per row, surface via the
+        batch_prepare_progress + batch_prepare_finished signals."""
+        if not self._can_start(label=f"batch prepare>={min_score}"):
+            self.failed.emit(
+                "batch_prepare", self._busy_message("batch prepare")
+            )
+            return
+        self._begin("batch_prepare")
+        self._stop_batch_event.clear()
+        asyncio.run_coroutine_threadsafe(
+            self._batch_prepare_runner(min_score, max_jobs), self._loop
+        )
+
+    def run_batch(
+        self,
+        job_urls: list[str],
+        allow_real_submit: bool,
+        throttle_seconds: int = 20,
+    ) -> None:
+        """Phase 2 of the batch flow: submit the approved set one by one.
+
+        `allow_real_submit` flows straight through to the safety gate; this
+        method does not flip it implicitly. The caller is responsible for
+        the user-facing confirmation dialog.
+        """
+        if not job_urls:
+            self.failed.emit("batch_run", "No jobs approved.")
+            return
+        if not self._can_start(label=f"batch run x{len(job_urls)}"):
+            self.failed.emit(
+                "batch_run", self._busy_message("batch run")
+            )
+            return
+        self._begin("batch_run")
+        self._stop_batch_event.clear()
+        asyncio.run_coroutine_threadsafe(
+            self._batch_run_runner(
+                list(job_urls), bool(allow_real_submit), int(throttle_seconds)
+            ),
+            self._loop,
+        )
+
+    def stop_batch(self) -> None:
+        """Graceful stop for a running batch: the current job completes,
+        no further jobs start. Distinct from cancel(), which cancels the
+        current job in flight."""
+        if self._get_state() != "running":
+            return
+        self._stop_batch_event.set()
+        self.log.emit("STOP requested: batch will halt after the current job.")
 
     def cancel(self) -> None:
         """Request cancellation. Stops between stages (cooperative) and tears
@@ -253,6 +320,70 @@ class EngineWorker(QObject):
             except Exception as exc:
                 logger.exception("EngineWorker: unhandled exception in session")
                 self.failed.emit("session", f"{type(exc).__name__}: {exc}")
+        finally:
+            self._current_task = None
+            self._set_state("idle")
+
+    async def _batch_prepare_runner(self, min_score: int, max_jobs: int) -> None:
+        self._current_task = asyncio.current_task()
+        try:
+            try:
+                def on_progress(done, total, row):
+                    self.batch_prepare_progress.emit(done, total, row)
+                    self.log.emit(
+                        f"[prepare {done}/{total}] {row.status}: {row.title}"
+                    )
+
+                rows = await prepare_batch(
+                    engine_workdir=self._engine_workdir,
+                    min_score=min_score,
+                    on_progress=on_progress,
+                    is_cancelled=self._cancel_event.is_set,
+                    max_jobs=max_jobs,
+                )
+                self.batch_prepare_finished.emit(rows)
+            except asyncio.CancelledError:
+                self.batch_prepare_finished.emit([])
+            except Exception as exc:
+                logger.exception("EngineWorker: batch_prepare crashed")
+                self.failed.emit("batch_prepare", f"{type(exc).__name__}: {exc}")
+        finally:
+            self._current_task = None
+            self._set_state("idle")
+
+    async def _batch_run_runner(
+        self,
+        job_urls: list[str],
+        allow_real_submit: bool,
+        throttle_seconds: int,
+    ) -> None:
+        self._current_task = asyncio.current_task()
+        try:
+            try:
+                def on_progress(done, total, result):
+                    self.batch_apply_progress.emit(done, total, result)
+                    msg = f"[run {done}/{total}] {result.status.value}"
+                    if result.error_message:
+                        msg += f": {result.error_message}"
+                    self.log.emit(msg)
+
+                tally = await run_batch(
+                    job_urls=job_urls,
+                    engine_workdir=self._engine_workdir,
+                    allow_real_submit=allow_real_submit,
+                    on_progress=on_progress,
+                    is_cancelled=self._cancel_event.is_set,
+                    is_stopped=self._stop_batch_event.is_set,
+                    throttle_seconds=throttle_seconds,
+                )
+                self.batch_apply_finished.emit(tally)
+            except asyncio.CancelledError:
+                # Build a partial tally so the UI is not left blank.
+                partial = BatchRunResult(stop_reason="cancelled")
+                self.batch_apply_finished.emit(partial)
+            except Exception as exc:
+                logger.exception("EngineWorker: batch_run crashed")
+                self.failed.emit("batch_run", f"{type(exc).__name__}: {exc}")
         finally:
             self._current_task = None
             self._set_state("idle")

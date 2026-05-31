@@ -26,18 +26,22 @@ logger = logging.getLogger(__name__)
 
 DEFAULTS: dict[str, object] = {
     "allow_real_submit": False,
-    # 50 was chosen as the self-use default after the first capstone run.
-    # The engine's daemon historically used 20, which works for an unattended
-    # auto-applier but is too low for interactive review (most scraped jobs
-    # in the 20 to 49 band were skim-able weak matches). At 50 the queue is
-    # short enough to review by eye and most rows are worth opening the JD.
-    # The setting is exposed in the Settings screen so the user can tune it.
-    "match_threshold": 50,
+    # Lowered from 50 to 10 for the batch-apply flow: when the user is
+    # working through the whole queue with review-then-run, weak matches
+    # are easy to deselect at the approve step, but jobs missing from the
+    # prepare list cannot be considered at all. 10 is permissive enough
+    # that almost every scored job appears for review; the user can still
+    # tune in Settings. Existing on-disk settings files keep their value.
+    "match_threshold": 10,
     "daily_cap": 30,
     "operating_hours_start": "07:00",
     "operating_hours_end": "23:00",
     "selected_job_url": None,
     "last_scrape_keyword": "",
+    # Seconds between live submissions in a batch. Throttled against Seek's
+    # anti-bot. The engine daemon historically waited 30 to 90s; for the
+    # interactive batch we default lower because the user is watching.
+    "batch_throttle_seconds": 20,
 }
 
 
@@ -123,6 +127,22 @@ class SettingsStore(QObject):
         if value == self.last_scrape_keyword:
             return
         self._data["last_scrape_keyword"] = value
+        self._save()
+
+    @property
+    def batch_throttle_seconds(self) -> int:
+        v = self._data.get("batch_throttle_seconds", 20)
+        try:
+            return max(0, int(v))
+        except (TypeError, ValueError):
+            return 20
+
+    @batch_throttle_seconds.setter
+    def batch_throttle_seconds(self, value: int) -> None:
+        value = max(0, int(value))
+        if value == self.batch_throttle_seconds:
+            return
+        self._data["batch_throttle_seconds"] = value
         self._save()
 
     # --------------------------------------------------------------- io

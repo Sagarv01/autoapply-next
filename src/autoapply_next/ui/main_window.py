@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from ..engine.worker import EngineWorker
 from ..safe_ui import get_bus, safe_slot, show_error_dialog
+from .batch_screen import BatchScreen
 from .profile_screen import ProfileScreen
 from .queue_screen import QueueScreen
 from .results_screen import ResultsScreen
@@ -44,6 +45,7 @@ SCREEN_NAMES = [
     "Profile",
     "Queue",
     "Run",
+    "Batch",
     "Results",
     "Settings",
 ]
@@ -81,6 +83,11 @@ class MainWindow(QMainWindow):
             worker=self._worker,
             settings=self._settings,
         )
+        self._batch = BatchScreen(
+            engine_workdir=engine_workdir,
+            worker=self._worker,
+            settings=self._settings,
+        )
         self._results = ResultsScreen(engine_workdir=engine_workdir)
         self._settings_screen = SettingsScreen(settings=self._settings)
 
@@ -95,6 +102,7 @@ class MainWindow(QMainWindow):
             self._profile,
             self._queue,
             self._run,
+            self._batch,
             self._results,
             self._settings_screen,
         ]:
@@ -130,6 +138,7 @@ class MainWindow(QMainWindow):
             (self._profile, "Profile"),
             (self._queue, "Queue"),
             (self._run, "Run"),
+            (self._batch, "Batch"),
             (self._results, "Results"),
             (self._settings_screen, "Settings"),
         ]
