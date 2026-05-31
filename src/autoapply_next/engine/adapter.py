@@ -170,7 +170,9 @@ async def _peek(job_url: str) -> tuple[bool, dict]:
 
 
 async def _peek_and_fetch_listing(job_url: str):
-    """Visit the listing, extract title/company/description, return a JobListing.
+    """Visit the listing, extract title/company/description, return a
+    JobListing **plus the open peek page so the caller can reuse it on
+    the apply step**.
 
     Title and company are pulled (in order):
       1. From `applications` row in `jobs.db` if one exists for this URL
@@ -180,19 +182,41 @@ async def _peek_and_fetch_listing(job_url: str):
          company. This is only hit if someone runs against a URL that has
          never been scraped, which is rare. The robust verifier matches by
          job id primarily, so a placeholder here does not break verify.
+
+    Returns ``(JobListing, is_quick, open_page)``:
+      - ``open_page`` is the live Playwright Page already navigated to
+        the apply URL when ``is_quick`` is True. Caller MUST either pass
+        it to ``applicator.apply(..., page=open_page)`` (which closes it
+        in its finally) or close it itself; otherwise it leaks inside the
+        engine's persistent context as a visible accumulated tab. This
+        mirrors job-finder/main.py:101-140 where the same page is reused.
+      - ``open_page`` is ``None`` when ``is_quick`` is False (the engine's
+        ``peek_is_quick_apply`` closes the page itself on the not-quick
+        path, see seek_apply.py:92-97) or when the navigation failed.
     """
     import seek_apply  # type: ignore[import-not-found]
     from models import JobListing  # type: ignore[import-not-found]
 
     session_state = str(Path("sessions/seek/state.json").resolve())
     description = await seek_apply.fetch_seek_jd(job_url, session_state)
-    is_quick, _ = await seek_apply.peek_is_quick_apply(job_url, session_state)
+    is_quick, peek_page_or_none = await seek_apply.peek_is_quick_apply(
+        job_url, session_state
+    )
 
     title, company = _title_company_from_db(job_url)
     if not title:
         title = _title_from_url(job_url)
     if company is None:
         company = ""
+
+    # On the quick-apply path the engine returns the live Page; on the
+    # not-quick / error paths it returns either None or a metadata dict
+    # (the engine's own conventions). Coerce anything that is not a
+    # Playwright Page into None so the caller can rely on `open_page is
+    # None` as the "nothing to close" sentinel.
+    open_page = peek_page_or_none if is_quick else None
+    if open_page is not None and not hasattr(open_page, "close"):
+        open_page = None
 
     return (
         JobListing(
@@ -204,7 +228,28 @@ async def _peek_and_fetch_listing(job_url: str):
             easy_apply=bool(is_quick),
         ),
         is_quick,
+        open_page,
     )
+
+
+async def _close_open_page_safely(open_page) -> None:
+    """Close a Playwright Page returned from ``peek_is_quick_apply`` when
+    we are NOT going to thread it through to ``applicator.apply`` (which
+    closes the page itself in its finally, see seek_apply.py:272-279).
+
+    Without this every score-failed / score-below-threshold / tailor-
+    failed / cancelled-after-peek job leaks one tab inside the engine's
+    persistent context. Across a long batch the leaked tabs accumulate
+    visibly. Swallow close errors: a noisy close on an already-detached
+    page is not worth surfacing; the bug we are preventing is the leak,
+    not a double-close warning.
+    """
+    if open_page is None:
+        return
+    try:
+        await open_page.close()
+    except Exception as exc:
+        logger.debug("close peek page: %s (ignored)", exc)
 
 
 def _title_company_from_db(job_url: str) -> tuple[str, str]:
@@ -441,10 +486,21 @@ async def apply_to_job(
                         job_url, "peek", exc, progress,
                         engine_workdir=engine_workdir,
                     )
-                job, is_quick = value
+                # `open_page` is the live Playwright Page that
+                # peek_is_quick_apply left open on the apply URL when
+                # is_quick is True. Threaded through to applicator.apply
+                # below (which closes it in its finally) so we don't leak
+                # a tab per job inside the engine's persistent context.
+                # Every early-return path between here and that apply call
+                # MUST close it via _close_open_page_safely. See
+                # _peek_and_fetch_listing docstring.
+                job, is_quick, open_page = value
                 logger.info("peek took %.1fs", time.monotonic() - t0)
 
                 if not is_quick:
+                    # `open_page` is None on the not-quick path
+                    # (peek_is_quick_apply closes the page itself, see
+                    # seek_apply.py:92-97). No close needed.
                     # Structural; not retryable. Raising JobNotQuickApplyError
                     # so persistence maps it to 'skipped' via map_status.
                     err = JobNotQuickApplyError(
@@ -475,6 +531,7 @@ async def apply_to_job(
                     non_retryable=(),
                 )
                 if not ok:
+                    await _close_open_page_safely(open_page)
                     return _failure(
                         job_url, "score", exc, progress,
                         engine_workdir=engine_workdir,
@@ -495,6 +552,7 @@ async def apply_to_job(
                         score,
                         match_threshold,
                     )
+                    await _close_open_page_safely(open_page)
                     skipped_result = ApplicationResult(
                         job_url=job_url,
                         status=ApplicationStatus.SKIPPED_LOW_SCORE,
@@ -533,6 +591,7 @@ async def apply_to_job(
                     non_retryable=non_retryable_tailor,
                 )
                 if not ok:
+                    await _close_open_page_safely(open_page)
                     return _failure(
                         job_url,
                         "tailor",
@@ -609,9 +668,18 @@ async def apply_to_job(
 
                 # candidate dict comes from config.yaml.
                 candidate = _load_candidate(engine_workdir / "config.yaml")
+                # Hand the peek page off to applicator.apply. From here
+                # on the page belongs to apply_seek_quick, which closes
+                # it in its own finally regardless of success or raise
+                # (see seek_apply.py:272-279). Setting `open_page = None`
+                # before the call means no early-return / raise path in
+                # the apply branch tries to double-close.
+                page_to_pass = open_page
+                open_page = None
                 try:
                     await applicator.apply(
-                        job, str(resume_pdf), str(cover_pdf), candidate
+                        job, str(resume_pdf), str(cover_pdf), candidate,
+                        page=page_to_pass,
                     )
                     # Reached here means real submit clicked AND the verifier
                     # returned True. With the RobustVerifier installed, True
@@ -825,15 +893,23 @@ async def score_job_only(
     with _engine_workdir(Path(engine_workdir).resolve()):
         import matcher  # type: ignore[import-not-found]
 
-        job, is_quick = await _peek_and_fetch_listing(job_url)
-        if not is_quick:
-            raise JobNotQuickApplyError(f"Not a quick-apply listing: {job_url}")
-        score, reasoning = await matcher.score_job(job)
-        return score, reasoning, {
-            "title": job.title,
-            "company": job.company,
-            "description_chars": len(job.description),
-        }
+        job, is_quick, open_page = await _peek_and_fetch_listing(job_url)
+        # score_job_only never calls applicator.apply, so it owns the
+        # close on the peek page; otherwise it leaks a tab in the
+        # persistent context for every call.
+        try:
+            if not is_quick:
+                raise JobNotQuickApplyError(
+                    f"Not a quick-apply listing: {job_url}"
+                )
+            score, reasoning = await matcher.score_job(job)
+            return score, reasoning, {
+                "title": job.title,
+                "company": job.company,
+                "description_chars": len(job.description),
+            }
+        finally:
+            await _close_open_page_safely(open_page)
 
 
 async def tailor_only(
@@ -845,10 +921,19 @@ async def tailor_only(
     with _engine_workdir(Path(engine_workdir).resolve()):
         import tailorer  # type: ignore[import-not-found]
 
-        job, _ = await _peek_and_fetch_listing(job_url)
-        journal_path = (
-            Path(engine_workdir).resolve() / "errors" / "applications.jsonl"
-        )
-        with EngineHooks(journal_path=journal_path) as hooks:
-            resume_pdf, cover_pdf = await tailorer.tailor(job, tier="full")
-            return Path(resume_pdf), Path(cover_pdf), hooks.captured.cover_letter_text
+        job, _is_quick, open_page = await _peek_and_fetch_listing(job_url)
+        # tailor_only never calls applicator.apply, so it owns the close
+        # on the peek page; otherwise it leaks a tab per call.
+        try:
+            journal_path = (
+                Path(engine_workdir).resolve() / "errors" / "applications.jsonl"
+            )
+            with EngineHooks(journal_path=journal_path) as hooks:
+                resume_pdf, cover_pdf = await tailorer.tailor(job, tier="full")
+                return (
+                    Path(resume_pdf),
+                    Path(cover_pdf),
+                    hooks.captured.cover_letter_text,
+                )
+        finally:
+            await _close_open_page_safely(open_page)

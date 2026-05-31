@@ -188,7 +188,10 @@ def engine_modules(tmp_path: Path, monkeypatch):
     applicator = types.ModuleType("applicator")
     applicator.BoardBlockedError = _BoardBlockedError
 
-    async def default_apply(job, resume_pdf, cover_pdf, candidate):
+    async def default_apply(job, resume_pdf, cover_pdf, candidate, page=None):
+        # `page=None` mirrors applicator.apply's signature after
+        # autoapply-next started threading the peek page through to
+        # avoid leaking a tab per job (job-finder parity).
         counters.apply_calls += 1
 
     applicator.apply = default_apply
@@ -517,7 +520,7 @@ def test_dry_run_does_not_write_in_progress(engine_modules, monkeypatch):
     import applicator
     from autoapply_next.engine.safety import DryRunReached
 
-    async def dry_run_apply(job, resume_pdf, cover_pdf, candidate):
+    async def dry_run_apply(job, resume_pdf, cover_pdf, candidate, page=None):
         counters.apply_calls += 1
         raise DryRunReached(
             screenshot_path=None,
@@ -611,7 +614,7 @@ def test_apply_stage_is_not_retried(engine_modules, monkeypatch):
     import applicator
     import seek_apply
 
-    async def failing_apply(job, resume_pdf, cover_pdf, candidate):
+    async def failing_apply(job, resume_pdf, cover_pdf, candidate, page=None):
         counters.apply_calls += 1
         raise seek_apply.SeekApplyError("submit stuck on step 5")
 
@@ -629,4 +632,126 @@ def test_apply_stage_is_not_retried(engine_modules, monkeypatch):
     # The critical assertion: exactly one apply attempt, never retried.
     assert counters.apply_calls == 1, (
         f"apply_calls={counters.apply_calls}, expected 1 (apply is one-shot)"
+    )
+
+
+# ============================================================================
+# peek-page-threading contract (regression: visible-tab-leak bug)
+#
+# Symptom observed live: chromium showed new tabs accumulating as the batch
+# ran. Root cause: `_peek_and_fetch_listing` discarded the open Page returned
+# by `seek_apply.peek_is_quick_apply`, and `applicator.apply` was called with
+# no `page=` kwarg, so seek_apply.apply_seek_quick opened a brand-new tab.
+# The orphaned peek tab lived in the engine's persistent context until the
+# whole context was torn down between phases. Per job: 1 leaked tab.
+#
+# The fix threads the peek Page through to applicator.apply, which closes
+# it in its finally (job-finder parity, main.py:101-140).
+
+
+def test_peek_page_is_threaded_into_applicator_apply(
+    engine_modules, monkeypatch
+):
+    """When peek_is_quick_apply returns a Page object, apply_to_job must
+    pass that exact object to applicator.apply via the `page=` kwarg, so
+    seek_apply.apply_seek_quick reuses (and ultimately closes) it instead
+    of opening a fresh tab."""
+    from autoapply_next.engine.adapter import apply_to_job
+
+    workdir, counters = engine_modules
+
+    class _FakePage:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    fake_page = _FakePage()
+
+    import seek_apply
+
+    async def peek_returns_page(url, session_state):
+        # The shape the real seek_apply.peek_is_quick_apply uses on the
+        # quick-apply path: (True, <live Page>). The adapter must forward
+        # this page object all the way into applicator.apply.
+        return True, fake_page
+
+    seek_apply.peek_is_quick_apply = peek_returns_page
+
+    import applicator
+
+    seen_page: dict = {}
+
+    async def assert_apply(job, resume_pdf, cover_pdf, candidate, page=None):
+        seen_page["page"] = page
+        counters.apply_calls += 1
+
+    applicator.apply = assert_apply
+
+    asyncio.run(
+        apply_to_job(
+            job_url="https://au.seek.com/job/800",
+            engine_workdir=workdir,
+            allow_real_submit=True,
+        )
+    )
+
+    assert counters.apply_calls == 1
+    assert seen_page.get("page") is fake_page, (
+        f"applicator.apply received page={seen_page.get('page')!r}, "
+        "expected the peek Page object (the visible-tab-leak regression)."
+    )
+
+
+def test_peek_page_is_closed_when_score_below_threshold(
+    engine_modules, monkeypatch
+):
+    """If the job is skipped (score below threshold) before applicator.apply
+    runs, the adapter owns the close on the peek Page. Otherwise the page
+    leaks: every below-threshold job would add a stale tab to the
+    persistent context."""
+    from autoapply_next.engine.adapter import apply_to_job
+
+    workdir, counters = engine_modules
+
+    class _FakePage:
+        def __init__(self):
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    fake_page = _FakePage()
+
+    import seek_apply
+
+    async def peek_returns_page(url, session_state):
+        return True, fake_page
+
+    seek_apply.peek_is_quick_apply = peek_returns_page
+
+    # Force the score below the default threshold of 20.
+    import matcher
+
+    async def low_score(job):
+        return 5, "weak match"
+
+    matcher.score_job = low_score
+
+    asyncio.run(
+        apply_to_job(
+            job_url="https://au.seek.com/job/801",
+            engine_workdir=workdir,
+            allow_real_submit=True,
+            match_threshold=20,
+        )
+    )
+
+    # Apply was never called (skipped on score), and the adapter closed
+    # the peek page itself.
+    assert counters.apply_calls == 0
+    assert fake_page.closed is True, (
+        "Peek page was leaked on the score-below-threshold path; "
+        "_close_open_page_safely was not called."
     )
