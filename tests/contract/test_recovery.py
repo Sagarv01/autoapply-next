@@ -225,3 +225,93 @@ def test_recover_orphans_after_persist_in_progress_round_trip(workdir):
     # Title/company preserved through the round trip.
     assert row["title"] == "Senior Eng"
     assert row["company"] == "Acme"
+
+
+# -------------------------------------------- live-watchdog age filter (regression)
+#
+# The OrphanWatchdog runs every 15 minutes inside the live process. Without
+# an age filter it would race a real in-flight apply (which parks an
+# in_progress row for ~3-5 minutes while Claude tailors and Seek's form
+# fills) and force-fail it, inflating failure_count. These tests pin the
+# `min_age_seconds` filter that prevents that race.
+
+
+def _seed_with_timestamps(workdir: Path, rows: list[tuple]) -> None:
+    """rows: (url, status, failure_count, timestamp).
+    Used where the test cares about wall-clock age of the row."""
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        for url, status, failure_count, timestamp in rows:
+            conn.execute(
+                "INSERT OR REPLACE INTO applications "
+                "(url, title, company, board, match_score, status, notes, "
+                " timestamp, failure_count) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                (url, "T", "C", "seek", 0, status, "", timestamp,
+                 failure_count),
+            )
+
+
+def test_recover_orphans_with_min_age_skips_fresh_in_progress(workdir):
+    """An in_progress row written 60 seconds ago is a LIVE apply, not a
+    crash orphan. The periodic watchdog must leave it alone when called
+    with min_age_seconds=15*60. This is the regression that caused the
+    live race observed in production: the watchdog flipped a row that
+    the running adapter then re-wrote to 'applied', inflating
+    failure_count to 1 first."""
+    from datetime import datetime, timedelta
+    fmt = "%Y-%m-%d %H:%M:%S"
+    fresh = datetime.now() - timedelta(seconds=60)
+    stale = datetime.now() - timedelta(minutes=30)
+    _seed_with_timestamps(workdir, [
+        ("https://au.seek.com/job/FRESH", "in_progress", 0, fresh.strftime(fmt)),
+        ("https://au.seek.com/job/STALE", "in_progress", 0, stale.strftime(fmt)),
+    ])
+    results = recover_orphans(
+        engine_workdir=workdir,
+        min_age_seconds=15 * 60,
+    )
+    # Only the stale row was reconciled.
+    assert len(results) == 1
+    assert results[0].url == "https://au.seek.com/job/STALE"
+    # Fresh row still in_progress, failure_count untouched: the live apply
+    # owns it.
+    fresh_row = _row(workdir, "https://au.seek.com/job/FRESH")
+    assert fresh_row["status"] == "in_progress"
+    assert fresh_row["failure_count"] == 0
+    # Stale row was flipped and failure_count incremented exactly once.
+    stale_row = _row(workdir, "https://au.seek.com/job/STALE")
+    assert stale_row["status"] == "failed"
+    assert stale_row["failure_count"] == 1
+
+
+def test_recover_orphans_min_age_none_force_fails_all(workdir):
+    """The default min_age_seconds=None preserves startup-recovery
+    semantics: any in_progress row after a process restart is by
+    definition stale, age irrelevant."""
+    from datetime import datetime, timedelta
+    fmt = "%Y-%m-%d %H:%M:%S"
+    five_seconds_ago = datetime.now() - timedelta(seconds=5)
+    _seed_with_timestamps(workdir, [
+        ("https://au.seek.com/job/A", "in_progress", 0,
+         five_seconds_ago.strftime(fmt)),
+    ])
+    # No min_age filter; even a 5-second-old row gets force-failed.
+    results = recover_orphans(engine_workdir=workdir)
+    assert len(results) == 1
+    assert _row(workdir, "https://au.seek.com/job/A")["status"] == "failed"
+
+
+def test_recover_orphans_min_age_zero_treated_as_none(workdir):
+    """A min_age_seconds=0 is degenerate (every row qualifies) and is
+    treated the same as None to keep the SQL simple. The startup path
+    can pass 0 explicitly if it wants to be loud about intent."""
+    from datetime import datetime, timedelta
+    fmt = "%Y-%m-%d %H:%M:%S"
+    one_second_ago = datetime.now() - timedelta(seconds=1)
+    _seed_with_timestamps(workdir, [
+        ("https://au.seek.com/job/Z", "in_progress", 0,
+         one_second_ago.strftime(fmt)),
+    ])
+    results = recover_orphans(engine_workdir=workdir, min_age_seconds=0)
+    assert len(results) == 1
+    assert _row(workdir, "https://au.seek.com/job/Z")["status"] == "failed"

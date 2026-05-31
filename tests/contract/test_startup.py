@@ -491,3 +491,32 @@ def test_orphan_watchdog_idempotent_start_stop(tmp_path):
     watchdog.start()  # idempotent
     watchdog.stop()
     watchdog.stop()  # safe after stop
+
+
+def test_orphan_watchdog_passes_min_age_seconds(tmp_path, monkeypatch, qtbot):
+    """Regression: the watchdog must forward ``min_age_seconds`` to
+    ``recover_orphans`` so it never races a live in-flight apply that
+    parked an ``in_progress`` row a few minutes ago. Without this the
+    watchdog flips the running row, the apply overwrites it on success,
+    and failure_count is silently inflated on the way through. Default
+    is 15*60 (matches OrphanWatchdog.__init__)."""
+    import autoapply_next.engine.persistence as persistence_mod
+
+    seen_kwargs: list[dict] = []
+
+    def fake_recover(*, engine_workdir, **kw):
+        seen_kwargs.append(kw)
+        return []
+
+    monkeypatch.setattr(
+        persistence_mod, "recover_orphans", fake_recover, raising=False
+    )
+
+    watchdog = OrphanWatchdog(engine_workdir=tmp_path, interval_ms=50)
+    watchdog.start()
+    try:
+        qtbot.waitUntil(lambda: len(seen_kwargs) >= 1, timeout=2000)
+    finally:
+        watchdog.stop()
+
+    assert seen_kwargs[0].get("min_age_seconds") == 15 * 60

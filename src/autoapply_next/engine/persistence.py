@@ -66,7 +66,7 @@ import logging
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .results import ApplicationResult, ApplicationStatus
@@ -495,6 +495,7 @@ def recover_orphans(
     *,
     engine_workdir: Path,
     verifier_factory=None,
+    min_age_seconds: int | None = None,
 ) -> list[ReconcileResult]:
     """Find every row at status='in_progress' (orphans from a crashed
     apply) and flip them to 'failed' so the user can re-queue.
@@ -502,6 +503,15 @@ def recover_orphans(
     Default path (verifier_factory=None): force-fail every orphan,
     increment failure_count, set a note. Mirrors job-finder's
     `recover_orphans` semantics from main.py.
+
+    `min_age_seconds`: if set, only reconcile rows whose `timestamp` is
+    older than `now - min_age_seconds`. **Critical for the live periodic
+    watchdog**: a real in-flight apply parks an `in_progress` row that
+    lives for minutes while Claude tailors and Seek's form fills; the
+    watchdog must not race that row. Pass `None` (default) from
+    startup-time callers, where any `in_progress` row is definitionally
+    a crash orphan from the previous process; pass `15*60` or similar
+    from periodic callers in the running process.
 
     If `verifier_factory` is provided this would use a RobustVerifier to
     reconcile each orphan against Seek's Applied Jobs page. That is NOT
@@ -529,12 +539,26 @@ def recover_orphans(
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     note = "Orphaned: daemon/app restarted mid-apply"
 
+    # Build the age cutoff once; SQLite stores our timestamps as
+    # 'YYYY-MM-DD HH:MM:SS' which compares lexicographically the same as
+    # chronologically, so plain string LT works.
+    if min_age_seconds is None or min_age_seconds <= 0:
+        cutoff_clause = ""
+        cutoff_params: tuple = ()
+    else:
+        cutoff_dt = datetime.now() - timedelta(seconds=int(min_age_seconds))
+        cutoff_str = cutoff_dt.strftime("%Y-%m-%d %H:%M:%S")
+        cutoff_clause = " AND COALESCE(timestamp, '') < ?"
+        cutoff_params = (cutoff_str,)
+
     try:
         with sqlite3.connect(db_path) as conn:
             orphans = conn.execute(
                 "SELECT url, status, COALESCE(notes, ''), "
                 "COALESCE(failure_count, 0) "
                 "FROM applications WHERE status = 'in_progress'"
+                + cutoff_clause,
+                cutoff_params,
             ).fetchall()
             for url, prior_status, prior_notes, prior_fc in orphans:
                 new_notes = (

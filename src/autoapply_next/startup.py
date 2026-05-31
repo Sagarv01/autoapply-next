@@ -313,21 +313,31 @@ class OrphanWatchdog(QObject):
     inside the recovery callback are logged and swallowed so the watchdog
     keeps running across a transient DB hiccup.
 
-    The default 15-minute filter matches Workstream A's contract in
-    PARALLEL_PLAN.md (do not reconcile rows younger than 15 minutes), but
-    that filter actually lives inside ``persistence.recover_orphans`` (or
-    is layered on top later); the watchdog itself just polls.
+    The 15-minute age filter is enforced by passing
+    ``min_age_seconds=15*60`` to ``persistence.recover_orphans`` on each
+    tick; that guarantees the watchdog never races a real in-flight
+    apply (which parks an ``in_progress`` row for ~3-5 minutes while
+    Claude tailors and Seek's form fills). Without this filter the
+    watchdog would force-fail the running job and rely on the apply's
+    later write to overwrite it, which works for ``applied`` (UPDATE
+    resets failure_count) but inflates failure_count on the failure
+    path and can trigger a false permafail (>= ``PERMAFAIL_THRESHOLD``).
+    Startup recovery, in contrast, calls ``recover_orphans`` with no
+    age filter because any ``in_progress`` row after a process restart
+    is definitionally a crash orphan from the previous process.
     """
 
     def __init__(
         self,
         engine_workdir: Path,
         interval_ms: int = 15 * 60 * 1000,
+        min_age_seconds: int = 15 * 60,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._engine_workdir = Path(engine_workdir)
         self._interval_ms = int(interval_ms)
+        self._min_age_seconds = int(min_age_seconds)
         self._timer: QTimer | None = None
         self._fired = 0
 
@@ -368,7 +378,10 @@ class OrphanWatchdog(QObject):
             )
             return
         try:
-            results = recover_orphans(engine_workdir=self._engine_workdir)
+            results = recover_orphans(
+                engine_workdir=self._engine_workdir,
+                min_age_seconds=self._min_age_seconds,
+            )
         except Exception as exc:
             logger.warning("OrphanWatchdog: recover_orphans raised: %s", exc)
             return
