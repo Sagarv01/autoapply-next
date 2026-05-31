@@ -66,6 +66,7 @@ from .hooks import EngineHooks
 from .progress import ProgressEvent, ProgressStage
 from .results import ApplicationResult, ApplicationStatus
 from .safety import DryRunReached, SafetyGate
+from .verifier import RobustVerifier, VerifyOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -155,26 +156,30 @@ async def _peek(job_url: str) -> tuple[bool, dict]:
 
 
 async def _peek_and_fetch_listing(job_url: str):
-    """Visit the listing, extract title/company/description, return a JobListing."""
+    """Visit the listing, extract title/company/description, return a JobListing.
+
+    Title and company are pulled (in order):
+      1. From `applications` row in `jobs.db` if one exists for this URL
+         (the scraper writes real values; this is the common case for jobs
+         the user picks from the Queue).
+      2. Fallback: a URL-derived placeholder ("Seek listing <id>") + empty
+         company. This is only hit if someone runs against a URL that has
+         never been scraped, which is rare. The robust verifier matches by
+         job id primarily, so a placeholder here does not break verify.
+    """
     import seek_apply  # type: ignore[import-not-found]
     from models import JobListing  # type: ignore[import-not-found]
 
-    # We need title + company + description for matcher and tailor. The engine
-    # has `fetch_seek_jd` for description; it does not expose a single "scrape
-    # listing metadata" function. So we open the page once, extract everything,
-    # and close.
     session_state = str(Path("sessions/seek/state.json").resolve())
     description = await seek_apply.fetch_seek_jd(job_url, session_state)
-
-    # Title / company / quick-apply flag come from peek.
     is_quick, _ = await seek_apply.peek_is_quick_apply(job_url, session_state)
 
-    # Title and company are extracted by peek as it loads the page, but the
-    # engine throws away that data. We re-derive title/company minimally from
-    # the URL slug as a fallback; quality is only the input to matcher's prompt
-    # so a rough title is OK.
-    title = _title_from_url(job_url)
-    company = ""
+    title, company = _title_company_from_db(job_url)
+    if not title:
+        title = _title_from_url(job_url)
+    if company is None:
+        company = ""
+
     return (
         JobListing(
             url=job_url,
@@ -186,6 +191,28 @@ async def _peek_and_fetch_listing(job_url: str):
         ),
         is_quick,
     )
+
+
+def _title_company_from_db(job_url: str) -> tuple[str, str]:
+    """Look up the title and company stored by the scraper in jobs.db.
+
+    Returns ("", "") if no row exists or the DB is missing. Cwd-relative
+    because the caller has `_engine_workdir` active.
+    """
+    import sqlite3
+
+    try:
+        with sqlite3.connect(Path("jobs.db").resolve()) as conn:
+            cur = conn.execute(
+                "SELECT title, company FROM applications WHERE url = ?",
+                (job_url,),
+            )
+            row = cur.fetchone()
+            if row:
+                return (row[0] or ""), (row[1] or "")
+    except sqlite3.OperationalError as exc:
+        logger.warning("_title_company_from_db: %s", exc)
+    return "", ""
 
 
 def _title_from_url(url: str) -> str:
@@ -241,11 +268,12 @@ async def apply_to_job(
         import matcher  # type: ignore[import-not-found]
         import tailorer  # type: ignore[import-not-found]
 
-        with EngineHooks(journal_path=journal_path) as hooks:
-            with SafetyGate(
-                allow_real_submit=allow_real_submit,
-                screenshot_dir=screenshot_dir,
-            ):
+        with EngineHooks(journal_path=journal_path) as hooks, \
+                SafetyGate(
+                    allow_real_submit=allow_real_submit,
+                    screenshot_dir=screenshot_dir,
+                ), \
+                RobustVerifier() as verifier:
                 # ---------- PEEK + listing fetch ----------
                 check_cancel("peek")
                 progress(
@@ -366,24 +394,57 @@ async def apply_to_job(
                     await applicator.apply(
                         job, str(resume_pdf), str(cover_pdf), candidate
                     )
-                    # Reached here means real submit succeeded; allow_real_submit
-                    # must have been True.
+                    # Reached here means real submit clicked AND the verifier
+                    # returned True. With the RobustVerifier installed, True
+                    # can mean APPLIED or UNCERTAIN; the dataclass on
+                    # `verifier.last_state` distinguishes them. APPLIED maps
+                    # to SUBMITTED; UNCERTAIN maps to SUBMITTED_UNCERTAIN so
+                    # the user can do a manual check (and so no future loop
+                    # treats it as a failure to retry).
                     hooks.read_last_journal()
+                    vstate = verifier.last_state
+                    is_uncertain = (
+                        vstate is not None
+                        and vstate.outcome == VerifyOutcome.UNCERTAIN
+                    )
+                    final_status = (
+                        ApplicationStatus.SUBMITTED_UNCERTAIN
+                        if is_uncertain
+                        else ApplicationStatus.SUBMITTED
+                    )
                     progress(
                         ProgressEvent(
                             stage=ProgressStage.SUBMITTED,
-                            message="Submitted and verified on Applied Jobs page",
+                            message=(
+                                "Submitted; verifier UNCERTAIN -- check Seek manually"
+                                if is_uncertain
+                                else "Submitted and verified on Applied Jobs page"
+                            ),
+                            detail={
+                                "verify_outcome": (
+                                    vstate.outcome.value if vstate else None
+                                ),
+                                "verify_detail": (
+                                    vstate.detail if vstate else None
+                                ),
+                            },
                         )
                     )
                     return ApplicationResult(
                         job_url=job_url,
-                        status=ApplicationStatus.SUBMITTED,
+                        status=final_status,
                         score=score,
                         reasoning=reasoning,
                         resume_pdf=Path(resume_pdf),
                         cover_pdf=Path(cover_pdf),
                         cover_letter_text=hooks.captured.cover_letter_text,
                         screening_answers=hooks.captured.screening_answers,
+                        verify_outcome=(
+                            vstate.outcome.value if vstate else None
+                        ),
+                        verify_detail=(
+                            vstate.detail if vstate else None
+                        ),
                     )
                 except DryRunReached as dry:
                     hooks.read_last_journal()
@@ -415,6 +476,7 @@ async def apply_to_job(
                     raise
                 except Exception as exc:
                     hooks.read_last_journal()
+                    vstate = verifier.last_state
                     return _failure(
                         job_url,
                         "apply",
@@ -426,6 +488,12 @@ async def apply_to_job(
                         cover_pdf=Path(cover_pdf),
                         cover_letter_text=hooks.captured.cover_letter_text,
                         screening_answers=hooks.captured.screening_answers,
+                        verify_outcome=(
+                            vstate.outcome.value if vstate else None
+                        ),
+                        verify_detail=(
+                            vstate.detail if vstate else None
+                        ),
                     )
 
 
@@ -441,6 +509,8 @@ def _failure(
     cover_pdf: Path | None = None,
     cover_letter_text: str | None = None,
     screening_answers: list[dict] | None = None,
+    verify_outcome: str | None = None,
+    verify_detail: str | None = None,
 ) -> ApplicationResult:
     msg = f"{stage} failed: {type(exc).__name__}: {exc}"
     progress(
@@ -467,6 +537,8 @@ def _failure(
         screening_answers=screening_answers,
         error_message=str(exc),
         exception_type=type(exc).__name__,
+        verify_outcome=verify_outcome,
+        verify_detail=verify_detail,
     )
 
 

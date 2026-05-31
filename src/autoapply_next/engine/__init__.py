@@ -9,6 +9,7 @@ Public surface (only thing the GUI should import from here):
 from .progress import ProgressEvent, ProgressStage
 from .results import ApplicationResult, ApplicationStatus
 from .safety import SafetyGate, DryRunReached
+from .verifier import RobustVerifier, VerifyOutcome, VerificationState
 from .adapter import apply_to_job, score_job_only, tailor_only
 
 __all__ = [
@@ -21,4 +22,7 @@ __all__ = [
     "ApplicationStatus",
     "SafetyGate",
     "DryRunReached",
+    "RobustVerifier",
+    "VerifyOutcome",
+    "VerificationState",
 ]

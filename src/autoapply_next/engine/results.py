@@ -14,6 +14,13 @@ class ApplicationStatus(str, Enum):
     SUBMITTED = "submitted"
     """Real submission completed and verified on the Applied Jobs page."""
 
+    SUBMITTED_UNCERTAIN = "submitted_uncertain"
+    """Real submit click happened but the verifier could not confirm or deny
+    the result (page errors throughout the poll window, no journal data,
+    etc.). The submission probably succeeded; check Seek's Applied Jobs
+    page manually. **Never auto-retry this status** -- retrying risks a
+    duplicate application."""
+
     SKIPPED_LOW_SCORE = "skipped_low_score"
     """Match score below the configured threshold; tailor + apply not attempted."""
 
@@ -41,3 +48,9 @@ class ApplicationResult:
     dry_run_screenshot: Path | None = None
     error_message: str | None = None
     exception_type: str | None = None
+    verify_outcome: str | None = None
+    """The robust verifier's outcome string ('applied' | 'not_applied' |
+    'uncertain'), captured for live submits. None for dry-run."""
+    verify_detail: str | None = None
+    """Human-readable verifier diagnostics (which strategy matched, how
+    many polls, etc.). Surfaced in the Results screen detail pane."""
