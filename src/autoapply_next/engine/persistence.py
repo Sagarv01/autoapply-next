@@ -171,6 +171,14 @@ def map_status(result: ApplicationResult) -> str | None:
         # Peek-stage JobNotQuickApplyError is a structural skip.
         if exc == "JobNotQuickApplyError":
             return "skipped"
+        # ExternalApplyError: engine reached the apply page and detected
+        # it is NOT a Quick Apply form (redirect to external recruiter
+        # ATS, or the form changed after the listing check). Same
+        # semantics as JobNotQuickApplyError; matches job-finder which
+        # classifies it as 'skipped' (vendor/job-finder/main.py:155-158).
+        # Re-queueing cannot fix this; the listing structure won't change.
+        if exc == "ExternalApplyError":
+            return "skipped"
         # Cover letter quality refusal: matches job-finder. Re-queueing
         # would not help; the tailor refused for content reasons.
         if exc == "CoverLetterQualityError":
@@ -184,6 +192,15 @@ def map_status(result: ApplicationResult) -> str | None:
         # again. Other BoardBlockedError shapes (rate limit, captcha,
         # network) still write as "failed" so the user can retry.
         if exc == "BoardBlockedError" and "session expired" in msg:
+            return "skipped"
+        # Generic "Not a Quick Apply form" / "external apply" message
+        # from the engine wrap may arrive as a plain Exception (the
+        # applicator re-raises some shapes wrapped). Detect by message.
+        if (
+            "not a quick apply form" in msg
+            or "external apply" in msg
+            or "external apply detected" in msg
+        ):
             return "skipped"
         return "failed"
     return None  # DRY_RUN_VERIFIED, CANCELLED

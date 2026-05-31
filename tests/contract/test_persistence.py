@@ -154,6 +154,33 @@ def test_map_status_failed_with_permission_error_to_skipped():
     assert map_status(result) == "skipped"
 
 
+def test_map_status_failed_with_external_apply_error_to_skipped():
+    # NEW contract: ExternalApplyError -> "skipped" (was "failed").
+    # Seen live 2026-05-31 23:47: engine reached apply page, Quick Apply
+    # marker absent (external ATS redirect). Re-queueing would fail
+    # again identically. Matches job-finder vendor/main.py:155-158.
+    result = ApplicationResult(
+        job_url="https://au.seek.com/job/1",
+        status=ApplicationStatus.FAILED,
+        exception_type="ExternalApplyError",
+        error_message="Not a Quick Apply form: https://au.seek.com/job/1/apply",
+    )
+    assert map_status(result) == "skipped"
+
+
+def test_map_status_failed_with_external_apply_message_to_skipped():
+    # Same shape but exception_type is a generic 'Exception' because the
+    # applicator wrapper may re-raise without preserving the original
+    # type. Detect by message instead.
+    result = ApplicationResult(
+        job_url="https://au.seek.com/job/2",
+        status=ApplicationStatus.FAILED,
+        exception_type="Exception",
+        error_message="Not a Quick Apply form: ...",
+    )
+    assert map_status(result) == "skipped"
+
+
 def test_map_status_failed_with_board_blocked_session_expired_to_skipped():
     # NEW contract: BoardBlockedError + "session expired" message
     # routes to "skipped" because re-queueing won't fix it.
