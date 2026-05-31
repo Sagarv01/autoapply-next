@@ -316,6 +316,51 @@ def _result_to_prepared(
 # --------------------------------------------------------------------------- run
 
 
+# Exception types that the adapter wraps as ApplicationStatus.FAILED but
+# that persistence.map_status maps to 'skipped' in jobs.db. These are
+# "this listing isn't a quick-apply" / "Claude refused this cover letter"
+# style outcomes — bad fits, not engine failures. The circuit breaker
+# must NOT count them toward the consecutive-failures streak; doing so
+# would halt healthy batches whenever 3 external-ATS listings happened
+# to queue up in a row (observed live on 2026-06-01: jobs 8/9/10 all
+# external, batch halted with 16 URLs still queued).
+#
+# This set must stay in sync with persistence.map_status FAILED branch.
+_SKIPPABLE_FAILURE_EXCEPTION_TYPES = frozenset({
+    "JobNotQuickApplyError",
+    "ExternalApplyError",
+    "CoverLetterQualityError",
+    "PermissionError",
+})
+
+
+def _is_streak_failure(result: ApplicationResult) -> bool:
+    """Return True only if this FAILED result should count toward the
+    consecutive-failures circuit-breaker streak.
+
+    Returns False for "this listing got skipped" exceptions (external
+    ATS, quality refusal, permission). For those, persistence.map_status
+    writes 'skipped' to jobs.db and job-finder's outer loop continues
+    to the next job. We mirror that here.
+
+    Also returns False when the FAILED result carries a BoardBlockedError
+    whose message starts with "Seek session expired" — same semantics
+    as map_status: that's a session-bootstrap problem, not a per-job
+    failure, and counting it toward a streak would conflate a single
+    expired session with a batch-quality problem.
+    """
+    if result.status != ApplicationStatus.FAILED:
+        return False
+    exc_type = result.exception_type or ""
+    if exc_type in _SKIPPABLE_FAILURE_EXCEPTION_TYPES:
+        return False
+    if exc_type == "BoardBlockedError" and (
+        "session expired" in (result.error_message or "").lower()
+    ):
+        return False
+    return True
+
+
 async def run_batch(
     *,
     job_urls: list[str],
@@ -465,17 +510,34 @@ async def run_batch(
                     tally.stop_reason = f"fatal:{fatal_reason}"
                     tally.consecutive_failures = consecutive_failures + 1
                     return tally
-                consecutive_failures += 1
-                if consecutive_failures >= max_consecutive_failures:
-                    logger.critical(
-                        "run_batch: %d consecutive non-fatal failures; "
-                        "halting batch. Remaining %d URLs stay queued.",
-                        consecutive_failures,
-                        max(0, total - i),
-                    )
-                    tally.stop_reason = "consecutive_failures"
-                    tally.consecutive_failures = consecutive_failures
-                    return tally
+                # The streak only counts genuine engine failures, NOT
+                # results that persistence.map_status would mark
+                # 'skipped' (external-ATS, cover-letter quality refusal,
+                # expired Seek session, etc.). Three external listings
+                # in a row is bad luck, not an engine fault — job-finder
+                # treats them as skips and keeps going. Without this
+                # guard the breaker was firing on healthy batches the
+                # moment 3 ATS jobs queued up consecutively.
+                if _is_streak_failure(result):
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.critical(
+                            "run_batch: %d consecutive non-fatal "
+                            "failures; halting batch. Remaining %d URLs "
+                            "stay queued.",
+                            consecutive_failures,
+                            max(0, total - i),
+                        )
+                        tally.stop_reason = "consecutive_failures"
+                        tally.consecutive_failures = consecutive_failures
+                        return tally
+                else:
+                    # FAILED-but-classified-as-skip: external listing,
+                    # quality refusal, etc. Treat as a skip for streak
+                    # purposes only — the row still went through the
+                    # FAILED accounting above and persistence still maps
+                    # it to its proper jobs.db status.
+                    consecutive_failures = 0
             else:
                 # Any non-FAILED outcome resets the streak. CANCELLED is
                 # handled above by an early return; we will not reach

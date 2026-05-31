@@ -290,6 +290,144 @@ def test_consecutive_counter_resets_on_success(
     assert len(tally.per_job) == 6
 
 
+def test_consecutive_streak_ignores_skip_classified_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: 3 back-to-back external-ATS listings (FAILED with
+    exception_type='JobNotQuickApplyError', which persistence.map_status
+    maps to 'skipped' in jobs.db) MUST NOT trip the consecutive-failures
+    circuit breaker. job-finder treats those as skips and continues; we
+    do the same. Observed live on 2026-06-01 when the breaker halted a
+    healthy batch on jobs 8/9/10 = three external-ATS listings."""
+    _install_fake_peek_session(monkeypatch)
+    call_log = _stub_apply_to_job(
+        monkeypatch,
+        [
+            _result("ext1", ApplicationStatus.FAILED,
+                    exc_type="JobNotQuickApplyError",
+                    error="Job is not a Seek quick-apply listing: ext1"),
+            _result("ext2", ApplicationStatus.FAILED,
+                    exc_type="JobNotQuickApplyError",
+                    error="Job is not a Seek quick-apply listing: ext2"),
+            _result("ext3", ApplicationStatus.FAILED,
+                    exc_type="JobNotQuickApplyError",
+                    error="Job is not a Seek quick-apply listing: ext3"),
+            # If the breaker fired wrongly we never reach the SUBMITTED;
+            # the test asserts we DO.
+            _result("real4", ApplicationStatus.SUBMITTED),
+        ],
+    )
+
+    from autoapply_next.engine import batch as batch_mod
+
+    monkeypatch.setattr(batch_mod.random, "uniform", lambda a, b: 0.0)
+
+    tally = asyncio.run(
+        run_batch(
+            job_urls=["ext1", "ext2", "ext3", "real4"],
+            engine_workdir=tmp_path,
+            allow_real_submit=False,
+            fatal_classifier=lambda **kw: None,
+            max_consecutive_failures=3,
+        )
+    )
+
+    assert tally.stop_reason == "completed", tally.stop_reason
+    assert call_log["urls"] == ["ext1", "ext2", "ext3", "real4"]
+    assert tally.consecutive_failures == 0
+    # The skipped-via-failure rows still went through FAILED accounting.
+    assert tally.failed == 3
+    assert tally.submitted == 1
+
+
+def test_consecutive_streak_ignores_cover_letter_quality_refusals(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Same regression for CoverLetterQualityError: persistence maps it
+    to 'skipped' (Claude refused the cover letter); circuit breaker must
+    skip it for streak accounting."""
+    _install_fake_peek_session(monkeypatch)
+    call_log = _stub_apply_to_job(
+        monkeypatch,
+        [
+            _result("clq1", ApplicationStatus.FAILED,
+                    exc_type="CoverLetterQualityError",
+                    error="COVER_LETTER_QUALITY_FAIL"),
+            _result("clq2", ApplicationStatus.FAILED,
+                    exc_type="CoverLetterQualityError",
+                    error="COVER_LETTER_QUALITY_FAIL"),
+            _result("clq3", ApplicationStatus.FAILED,
+                    exc_type="CoverLetterQualityError",
+                    error="COVER_LETTER_QUALITY_FAIL"),
+            _result("real4", ApplicationStatus.SUBMITTED),
+        ],
+    )
+
+    from autoapply_next.engine import batch as batch_mod
+
+    monkeypatch.setattr(batch_mod.random, "uniform", lambda a, b: 0.0)
+
+    tally = asyncio.run(
+        run_batch(
+            job_urls=["clq1", "clq2", "clq3", "real4"],
+            engine_workdir=tmp_path,
+            allow_real_submit=False,
+            fatal_classifier=lambda **kw: None,
+            max_consecutive_failures=3,
+        )
+    )
+
+    assert tally.stop_reason == "completed", tally.stop_reason
+    assert call_log["urls"] == ["clq1", "clq2", "clq3", "real4"]
+
+
+def test_consecutive_streak_counts_real_engine_failures(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Companion to the skip-classification regression: a non-skip
+    exception (e.g. SeekApplyError 'stuck on step 5') MUST still count
+    toward the streak. Without this we would never halt on genuine
+    engine breakage."""
+    _install_fake_peek_session(monkeypatch)
+    call_log = _stub_apply_to_job(
+        monkeypatch,
+        [
+            # Two skip-classified (don't count) ...
+            _result("ext1", ApplicationStatus.FAILED,
+                    exc_type="JobNotQuickApplyError", error="external"),
+            _result("ext2", ApplicationStatus.FAILED,
+                    exc_type="ExternalApplyError", error="external"),
+            # ... then three genuine failures (do count).
+            _result("real1", ApplicationStatus.FAILED,
+                    exc_type="SeekApplyError", error="stuck step"),
+            _result("real2", ApplicationStatus.FAILED,
+                    exc_type="SeekApplyError", error="stuck step"),
+            _result("real3", ApplicationStatus.FAILED,
+                    exc_type="SeekApplyError", error="stuck step"),
+            # never reached
+            _result("real4", ApplicationStatus.SUBMITTED),
+        ],
+    )
+
+    from autoapply_next.engine import batch as batch_mod
+
+    monkeypatch.setattr(batch_mod.random, "uniform", lambda a, b: 0.0)
+
+    tally = asyncio.run(
+        run_batch(
+            job_urls=["ext1", "ext2", "real1", "real2", "real3", "real4"],
+            engine_workdir=tmp_path,
+            allow_real_submit=False,
+            fatal_classifier=lambda **kw: None,
+            max_consecutive_failures=3,
+        )
+    )
+
+    assert tally.stop_reason == "consecutive_failures"
+    assert tally.consecutive_failures == 3
+    assert call_log["urls"] == ["ext1", "ext2", "real1", "real2", "real3"]
+
+
 def test_daily_cap_enforced(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
