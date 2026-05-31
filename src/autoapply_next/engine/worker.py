@@ -56,6 +56,7 @@ from .batch import (
     prepare_batch,
     run_batch,
 )
+from .persistence import is_fatal_condition, queued_urls_for_batch
 from .progress import ProgressEvent
 from .results import ApplicationResult, ApplicationStatus
 from .scraping import ScrapeResult, scrape_and_score
@@ -64,6 +65,11 @@ from .session_bootstrap import (
     SessionStatus,
     run_session_bootstrap,
 )
+
+
+# Mirrors vendor/job-finder/main.py:188 MAX_APPLIES_PER_RUN. Hard cap on a
+# single scrape-and-auto-apply pass so a wide scrape cannot run for hours.
+MAX_APPLIES_PER_RUN = 100
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +154,11 @@ class EngineWorker(QObject):
     def scrape_and_score(
         self, keyword: str, location: str = "Australia"
     ) -> None:
-        """Scrape Seek for one keyword, score results, persist to jobs.db."""
+        """Scrape Seek for one keyword, score results, persist to jobs.db.
+
+        Does NOT auto-apply. Use `scrape_and_auto_apply` for the
+        scrape-then-apply pipeline that mirrors job-finder's daemon.
+        """
         if not self._can_start(label=f"scrape {keyword}"):
             self.failed.emit(
                 "scrape", self._busy_message("scrape")
@@ -157,6 +167,51 @@ class EngineWorker(QObject):
         self._begin("scrape")
         asyncio.run_coroutine_threadsafe(
             self._scrape_runner(keyword, location), self._loop
+        )
+
+    def scrape_and_auto_apply(
+        self,
+        keyword: str,
+        *,
+        location: str = "Australia",
+        allow_real_submit: bool,
+        throttle_seconds: int = 60,
+        daily_cap: int = 0,
+        max_jobs: int = MAX_APPLIES_PER_RUN,
+    ) -> None:
+        """Chained operation: scrape Seek for `keyword`, then auto-apply
+        every queued job at or above the worker's `match_threshold` in
+        score-descending order, mirroring `vendor/job-finder/main.py`.
+
+        `allow_real_submit` flows straight through to the safety gate;
+        the caller (typically QueueScreen) reads it from
+        `SettingsStore.allow_real_submit`. The Settings checkbox + its
+        confirmation dialog remain the master switch; nothing here
+        bypasses it.
+
+        Stop / cancel semantics inherit from the existing batch runner:
+        `stop_batch()` halts after the current job, `cancel()` cancels
+        the current job in flight. Circuit breaker (fatal classifier +
+        consecutive failures) and pacing are unchanged.
+        """
+        if not self._can_start(label=f"scrape+apply {keyword}"):
+            self.failed.emit(
+                "scrape_and_auto_apply",
+                self._busy_message("scrape-and-apply"),
+            )
+            return
+        self._begin("scrape_and_auto_apply")
+        self._stop_batch_event.clear()
+        asyncio.run_coroutine_threadsafe(
+            self._scrape_then_apply_runner(
+                keyword=keyword,
+                location=location,
+                allow_real_submit=bool(allow_real_submit),
+                throttle_seconds=int(throttle_seconds),
+                daily_cap=int(daily_cap),
+                max_jobs=int(max_jobs),
+            ),
+            self._loop,
         )
 
     def prepare_batch(self, min_score: int, max_jobs: int = 30) -> None:
@@ -446,6 +501,102 @@ class EngineWorker(QObject):
             except Exception as exc:
                 logger.exception("EngineWorker: batch_run crashed")
                 self.failed.emit("batch_run", f"{type(exc).__name__}: {exc}")
+        finally:
+            self._current_task = None
+            self._set_state("idle")
+
+    async def _scrape_then_apply_runner(
+        self,
+        *,
+        keyword: str,
+        location: str,
+        allow_real_submit: bool,
+        throttle_seconds: int,
+        daily_cap: int,
+        max_jobs: int,
+    ) -> None:
+        """Worker-side chained runner. Mirrors job-finder/main.py:
+        Phase 1 scrape; Phase 1.5 select score-desc; Phase 2 apply.
+
+        On exit the worker emits batch_apply_finished with the TRUE tally
+        (Contract 5), even on cancellation / fatal halt."""
+        self._current_task = asyncio.current_task()
+        tally = BatchRunResult()
+        try:
+            try:
+                # Phase 1: scrape. Same path as scrape_and_score.
+                scrape_result = await scrape_and_score(
+                    keyword=keyword,
+                    location=location,
+                    engine_workdir=self._engine_workdir,
+                    on_status=self._emit_log,
+                    is_cancelled=self._cancel_event.is_set,
+                )
+                self.scrape_finished.emit(scrape_result)
+                if self._cancel_event.is_set() or self._stop_batch_event.is_set():
+                    tally.stop_reason = (
+                        "cancelled" if self._cancel_event.is_set() else "user_stop"
+                    )
+                    self.batch_apply_finished.emit(tally)
+                    return
+
+                # Phase 1.5: enumerate eligible queued URLs in score-desc
+                # order, capped at max_jobs (mirrors MAX_APPLIES_PER_RUN).
+                urls = queued_urls_for_batch(
+                    engine_workdir=self._engine_workdir,
+                    min_score=self._match_threshold,
+                )
+                urls = urls[:max_jobs]
+                if not urls:
+                    self.log.emit(
+                        f"Auto-apply: no queued jobs at score >= "
+                        f"{self._match_threshold}; nothing to do."
+                    )
+                    self.batch_apply_finished.emit(tally)
+                    return
+                mode = "LIVE" if allow_real_submit else "dry-run"
+                self.log.emit(
+                    f"Auto-apply ({mode}): {len(urls)} job(s) at score "
+                    f">= {self._match_threshold}, score-desc, "
+                    f"throttle {throttle_seconds}-{throttle_seconds + 60}s, "
+                    f"cap {max_jobs}, STOP available on Batch screen."
+                )
+
+                # Phase 2: apply. Same run_batch contract as the manual
+                # batch flow; safety gate, circuit breaker, persistence,
+                # tally all unchanged.
+                def on_progress(done, total, result):
+                    self.batch_apply_progress.emit(done, total, result)
+                    msg = f"[run {done}/{total}] {result.status.value}"
+                    if result.error_message:
+                        msg += f": {result.error_message}"
+                    self.log.emit(msg)
+
+                lower = max(60, int(throttle_seconds))
+                throttle_range = (lower, lower + 60)
+                await run_batch(
+                    job_urls=urls,
+                    engine_workdir=self._engine_workdir,
+                    allow_real_submit=allow_real_submit,
+                    on_progress=on_progress,
+                    is_cancelled=self._cancel_event.is_set,
+                    is_stopped=self._stop_batch_event.is_set,
+                    throttle_range_seconds=throttle_range,
+                    tally=tally,
+                    fatal_classifier=is_fatal_condition,
+                    max_consecutive_failures=3,
+                    daily_cap=daily_cap,
+                )
+                self.batch_apply_finished.emit(tally)
+            except asyncio.CancelledError:
+                tally.stop_reason = "cancelled"
+                self.batch_apply_finished.emit(tally)
+            except Exception as exc:
+                logger.exception("EngineWorker: scrape+apply crashed")
+                self.failed.emit(
+                    "scrape_and_auto_apply",
+                    f"{type(exc).__name__}: {exc}",
+                )
         finally:
             self._current_task = None
             self._set_state("idle")

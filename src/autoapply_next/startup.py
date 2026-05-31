@@ -44,6 +44,7 @@ import os
 import shutil
 import subprocess
 import sys
+import sys
 from contextlib import contextmanager
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -172,7 +173,15 @@ def acquire_seek_lock(engine_workdir: Path | None = None) -> Iterator[None]:
     with a friendly message that includes the lockfile path.
     """
     # Import lazily so a partial vendor checkout does not crash unrelated
-    # callers at module import time.
+    # callers at module import time. vendor/job-finder lives one level
+    # above this package's parent (REPO_ROOT/vendor/job-finder); production
+    # runs (python -m autoapply_next) do not have it on sys.path, only the
+    # tests do via their session-level prepend, so we add it here.
+    _vendor = (
+        Path(__file__).resolve().parent.parent.parent / "vendor" / "job-finder"
+    )
+    if _vendor.is_dir() and str(_vendor) not in sys.path:
+        sys.path.insert(0, str(_vendor))
     from process_lock import LOCK_PATH, seek_lock  # type: ignore[import-not-found]
 
     previous_cwd: Path | None = None

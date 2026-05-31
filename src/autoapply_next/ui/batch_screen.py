@@ -1,19 +1,16 @@
-"""BatchScreen: review-then-run batch apply.
+"""BatchScreen: live status monitor for an auto-apply run.
 
-Three sections, top to bottom:
+After the user clicked "Scrape and apply" on Queue, QueueScreen asks
+MainWindow to swap to this screen. The worker's
+`scrape_and_auto_apply` pipeline runs Phase 1 (scrape) then Phase 2
+(apply each eligible queued job, score-desc, capped, throttled). Here
+we surface live progress and the STOP button.
 
-  1. Prepare bar: threshold display, "Prepare batch" button, cancel,
-     progress label.
-  2. Approve table: one row per prepared job, with a checkbox, score,
-     title @ company, status pill, and a "View cover letter / Q&A"
-     expander into a side detail pane.
-  3. Run bar: "Select all / Deselect all", "Submit N selected", STOP
-     (visible during run), tally readout (submitted / verified / failed /
-     skipped / cancelled), stop-reason on completion.
-
-Default is DRY_RUN. The Run bar's primary button reads "Submit N (dry-run)"
-or "Submit N (LIVE)" depending on the SettingsStore gate. The pre-run
-confirmation dialog spells out the exact count and mode.
+Per-job preview (cover letter + Q&A) is shown post-hoc as rows land;
+the apply flow itself does NOT pause for human review, mirroring
+job-finder's daemon (`vendor/job-finder/main.py`). The safety gate
+(`SettingsStore.allow_real_submit`) is the only thing that distinguishes
+real from dry-run; that choice + its confirmation live in Settings.
 """
 
 from __future__ import annotations
@@ -24,7 +21,6 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
-    QCheckBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -40,123 +36,131 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..engine.batch import BatchPreparedJob, BatchRunResult
+from ..engine.batch import BatchRunResult
 from ..engine.results import ApplicationResult, ApplicationStatus
 from ..engine.worker import EngineWorker
-from ..safe_ui import confirm_dialog, safe_slot, show_error_dialog
+from ..safe_ui import safe_slot, show_error_dialog
 from .settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
 
 
-PREPARE_MAX_JOBS = 30
-
-
 class BatchScreen(QWidget):
+    """Status monitor for the scrape -> auto-apply pipeline.
+
+    Trigger lives elsewhere (QueueScreen's "Scrape and apply"). This screen
+    only renders progress + lets the user STOP."""
+
     def __init__(
-        self, *, engine_workdir: Path, worker: EngineWorker, settings: SettingsStore
+        self,
+        *,
+        engine_workdir: Path,
+        worker: EngineWorker,
+        settings: SettingsStore,
     ):
         super().__init__()
         self._engine_workdir = engine_workdir
         self._worker = worker
         self._settings = settings
-        self._prepared: list[BatchPreparedJob] = []
-        self._row_checkboxes: list[QCheckBox] = []
+        # Maps url -> row index in the table so per-job updates land in
+        # the right cell. New URLs append new rows.
+        self._row_for_url: dict[str, int] = {}
+        # Captured per-row results so the detail pane can show cover
+        # letter / Q&A on click.
+        self._results: list[ApplicationResult] = []
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        title = QLabel("Batch apply")
+        title = QLabel("Batch (auto-apply)")
         title.setFont(_h1())
         layout.addWidget(title)
 
-        layout.addWidget(self._build_prepare_bar())
+        layout.addWidget(self._build_status_bar())
         layout.addWidget(self._build_table_block(), stretch=1)
-        layout.addWidget(self._build_run_bar())
         layout.addWidget(self._build_tally())
 
-        # Wire worker signals (we only handle batch + state).
+        # Wire worker signals. Note: we no longer subscribe to
+        # batch_prepare_*; the auto-apply flow does not run a prepare
+        # phase. batch_apply_progress fires per job during the run.
         self._worker.state_changed.connect(self._on_worker_state)
         self._worker.failed.connect(self._on_worker_failed)
-        self._worker.batch_prepare_progress.connect(self._on_prepare_progress)
-        self._worker.batch_prepare_finished.connect(self._on_prepare_finished)
         self._worker.batch_apply_progress.connect(self._on_run_progress)
         self._worker.batch_apply_finished.connect(self._on_run_finished)
-        self._settings.allow_real_submit_changed.connect(self._refresh_submit_label)
+        self._worker.scrape_finished.connect(self._on_scrape_finished)
+        self._worker.log.connect(self._on_log)
+        self._settings.allow_real_submit_changed.connect(self._refresh_mode_label)
         self._settings.match_threshold_changed.connect(self._refresh_threshold_label)
 
         self._refresh_threshold_label(self._settings.match_threshold)
-        self._refresh_submit_label(self._settings.allow_real_submit)
+        self._refresh_mode_label(self._settings.allow_real_submit)
 
-    # ----------------------------------------------------------- widgets
+    # ------------------------------------------------------------- widgets
 
-    def _build_prepare_bar(self) -> QWidget:
+    def _build_status_bar(self) -> QWidget:
         wrap = QFrame()
-        wrap.setObjectName("prepare-bar")
+        wrap.setObjectName("status-bar")
         wrap.setStyleSheet(
-            "QFrame#prepare-bar { border: 1px solid #d1d5db; "
+            "QFrame#status-bar { border: 1px solid #d1d5db; "
             "border-radius: 8px; padding: 8px; }"
         )
         h = QHBoxLayout(wrap)
 
+        self._mode_label = QLabel()
+        self._mode_label.setMinimumWidth(120)
+        self._mode_label.setAlignment(Qt.AlignCenter)
+        h.addWidget(self._mode_label)
+
+        self._status_label = QLabel("Idle")
+        self._status_label.setStyleSheet("color: #374151;")
+        h.addWidget(self._status_label, stretch=1)
+
         self._threshold_label = QLabel()
-        self._threshold_label.setStyleSheet("color: #374151;")
+        self._threshold_label.setStyleSheet("color: #6b7280;")
         h.addWidget(self._threshold_label)
 
-        h.addStretch(1)
-
-        self._prepare_btn = QPushButton("Prepare batch")
-        self._prepare_btn.setStyleSheet(_primary_btn())
-        self._prepare_btn.setToolTip(
-            "For every queued job at or above the threshold, dry-run "
-            "the engine and capture the cover letter + screening answers. "
-            "Nothing is submitted yet."
+        self._stop_btn = QPushButton("STOP batch")
+        self._stop_btn.setStyleSheet(_stop_btn_css())
+        self._stop_btn.setEnabled(False)
+        self._stop_btn.setToolTip(
+            "Halt the batch after the current job completes. The remaining "
+            "jobs stay 'queued'; the next Scrape-and-apply picks them back up."
         )
-        self._prepare_btn.clicked.connect(self._on_prepare_clicked)
-        h.addWidget(self._prepare_btn)
-
-        self._prepare_cancel_btn = QPushButton("Cancel prepare")
-        self._prepare_cancel_btn.setEnabled(False)
-        self._prepare_cancel_btn.clicked.connect(self._worker.cancel)
-        h.addWidget(self._prepare_cancel_btn)
-
-        self._prepare_progress = QProgressBar()
-        self._prepare_progress.setRange(0, 0)
-        self._prepare_progress.setVisible(False)
-        self._prepare_progress.setFixedWidth(180)
-        h.addWidget(self._prepare_progress)
+        self._stop_btn.clicked.connect(self._on_stop_clicked)
+        h.addWidget(self._stop_btn)
         return wrap
 
     def _build_table_block(self) -> QWidget:
         splitter = QSplitter(Qt.Horizontal)
 
-        # Left: table.
         table_wrap = QWidget()
         tv = QVBoxLayout(table_wrap)
         tv.setContentsMargins(0, 0, 0, 0)
-        self._table = QTableWidget(0, 6)
+        self._table = QTableWidget(0, 5)
         self._table.setHorizontalHeaderLabels(
-            ["✓", "Score", "Title", "Company", "Status", "URL"]
+            ["#", "Score", "Title", "Company", "Status"]
         )
         self._table.horizontalHeader().setSectionResizeMode(
             2, QHeaderView.Stretch
         )
-        self._table.setColumnWidth(0, 32)
+        self._table.setColumnWidth(0, 40)
         self._table.setColumnWidth(1, 60)
-        self._table.setColumnWidth(4, 110)
-        self._table.setColumnWidth(5, 60)
+        self._table.setColumnWidth(4, 130)
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.currentCellChanged.connect(self._on_row_changed)
         tv.addWidget(self._table)
         splitter.addWidget(table_wrap)
 
-        # Right: detail tabs (cover letter + Q&A + raw).
+        # Detail tabs: shown after a row completes (post-hoc review).
         detail_wrap = QWidget()
         dv = QVBoxLayout(detail_wrap)
         dv.setContentsMargins(0, 0, 0, 0)
-        self._detail_header = QLabel("Select a row to preview.")
+        self._detail_header = QLabel(
+            "Auto-apply runs without per-job preview; "
+            "completed rows show their cover letter and Q&A here."
+        )
         self._detail_header.setFont(_h2())
         self._detail_header.setWordWrap(True)
         dv.addWidget(self._detail_header)
@@ -165,7 +169,7 @@ class BatchScreen(QWidget):
         self._cover_view = QPlainTextEdit()
         self._cover_view.setReadOnly(True)
         self._cover_view.setStyleSheet(_text_view_css())
-        self._cover_view.setPlaceholderText("Cover letter preview.")
+        self._cover_view.setPlaceholderText("Cover letter (post-submit).")
         self._tabs.addTab(self._cover_view, "Cover letter")
 
         self._qa_view = QPlainTextEdit()
@@ -186,49 +190,6 @@ class BatchScreen(QWidget):
         splitter.setStretchFactor(1, 2)
         return splitter
 
-    def _build_run_bar(self) -> QWidget:
-        wrap = QFrame()
-        wrap.setObjectName("run-bar")
-        wrap.setStyleSheet(
-            "QFrame#run-bar { border: 1px solid #d1d5db; "
-            "border-radius: 8px; padding: 8px; }"
-        )
-        h = QHBoxLayout(wrap)
-
-        self._select_all_btn = QPushButton("Select all ready")
-        self._select_all_btn.clicked.connect(self._on_select_all_clicked)
-        self._select_all_btn.setEnabled(False)
-        h.addWidget(self._select_all_btn)
-
-        self._deselect_all_btn = QPushButton("Deselect all")
-        self._deselect_all_btn.clicked.connect(self._on_deselect_all_clicked)
-        self._deselect_all_btn.setEnabled(False)
-        h.addWidget(self._deselect_all_btn)
-
-        h.addStretch(1)
-
-        self._selected_label = QLabel("0 selected")
-        self._selected_label.setStyleSheet("color: #6b7280;")
-        h.addWidget(self._selected_label)
-
-        self._submit_btn = QPushButton("Submit 0 (dry-run)")
-        self._submit_btn.setMinimumWidth(200)
-        self._submit_btn.setStyleSheet(_primary_btn())
-        self._submit_btn.setEnabled(False)
-        self._submit_btn.clicked.connect(self._on_submit_clicked)
-        h.addWidget(self._submit_btn)
-
-        self._stop_btn = QPushButton("STOP batch")
-        self._stop_btn.setStyleSheet(
-            "QPushButton { background: #b91c1c; color: white; padding: 8px 16px; "
-            "border-radius: 6px; font-weight: bold; }"
-            "QPushButton:disabled { background: #fecaca; color: #fff; }"
-        )
-        self._stop_btn.setEnabled(False)
-        self._stop_btn.clicked.connect(self._on_stop_clicked)
-        h.addWidget(self._stop_btn)
-        return wrap
-
     def _build_tally(self) -> QWidget:
         wrap = QFrame()
         wrap.setObjectName("tally")
@@ -238,7 +199,7 @@ class BatchScreen(QWidget):
         )
         h = QHBoxLayout(wrap)
         h.setContentsMargins(12, 6, 12, 6)
-        self._tally_label = QLabel("No batch run yet.")
+        self._tally_label = QLabel("No batch yet.")
         self._tally_label.setStyleSheet("color: #111827;")
         h.addWidget(self._tally_label)
         h.addStretch(1)
@@ -250,158 +211,70 @@ class BatchScreen(QWidget):
         h.addWidget(self._run_progress)
         return wrap
 
-    # ----------------------------------------------------------- handlers
+    # ------------------------------------------------------------- slots
 
     @Slot(int)
     def _refresh_threshold_label(self, value: int) -> None:
-        self._threshold_label.setText(
-            f"Prepare jobs with score >= {value} (change in Settings, max "
-            f"{PREPARE_MAX_JOBS} per prepare). Default is 10."
-        )
+        self._threshold_label.setText(f"threshold >= {value}")
 
     @Slot(bool)
-    def _refresh_submit_label(self, allowed: bool) -> None:
-        self._update_submit_button()
-        # Re-style if running -- the badge separately reflects the gate; we
-        # only colour the button.
-
-    def _update_submit_button(self) -> None:
-        count = self._selected_count()
-        live = self._settings.allow_real_submit
-        text = (
-            f"Submit {count} (LIVE)" if live else f"Submit {count} (dry-run)"
-        )
-        self._submit_btn.setText(text)
-        if live:
-            self._submit_btn.setStyleSheet(
-                "QPushButton { background: #b91c1c; color: white; padding: 8px 16px; "
-                "border-radius: 6px; font-weight: bold; }"
-                "QPushButton:disabled { background: #fecaca; }"
+    def _refresh_mode_label(self, allowed: bool) -> None:
+        if allowed:
+            self._mode_label.setText("LIVE SUBMIT")
+            self._mode_label.setStyleSheet(
+                "padding: 4px 10px; background: #b91c1c; color: white; "
+                "border-radius: 4px; font-weight: bold;"
             )
         else:
-            self._submit_btn.setStyleSheet(_primary_btn())
-        self._submit_btn.setEnabled(count > 0 and self._worker_idle())
-        self._selected_label.setText(f"{count} selected")
+            self._mode_label.setText("DRY-RUN")
+            self._mode_label.setStyleSheet(
+                "padding: 4px 10px; background: #15803d; color: white; "
+                "border-radius: 4px; font-weight: bold;"
+            )
 
-    def _selected_count(self) -> int:
-        return sum(1 for cb in self._row_checkboxes if cb.isChecked())
+    @Slot(str)
+    def _on_worker_state(self, state: str) -> None:
+        running = state in ("running", "cancelling")
+        self._stop_btn.setEnabled(running)
+        self._run_progress.setVisible(running)
+        if not running:
+            self._status_label.setText("Idle")
 
-    def _approved_urls(self) -> list[str]:
-        urls = []
-        for cb, row in zip(self._row_checkboxes, self._prepared):
-            if cb.isChecked() and row.ready:
-                urls.append(row.url)
-        return urls
-
-    def _worker_idle(self) -> bool:
-        # state_changed handler tracks this; recompute defensively via the
-        # button's own state (Prepare button disabled = worker busy).
-        return self._prepare_btn.isEnabled()
-
-    @Slot()
+    @Slot(str)
     @safe_slot
-    def _on_prepare_clicked(self) -> None:
-        self._prepared = []
-        self._row_checkboxes = []
-        self._table.setRowCount(0)
-        self._tally_label.setText(
-            f"Preparing jobs with score >= {self._settings.match_threshold}..."
-        )
-        self._worker.prepare_batch(
-            self._settings.match_threshold, max_jobs=PREPARE_MAX_JOBS
-        )
-
-    @Slot(int, int, object)
-    @safe_slot
-    def _on_prepare_progress(
-        self, done: int, total: int, row: BatchPreparedJob
-    ) -> None:
-        self._prepared.append(row)
-        self._append_table_row(row)
-        self._tally_label.setText(
-            f"Preparing... {done}/{total}: {row.status} -> {row.title}"
-        )
+    def _on_log(self, line: str) -> None:
+        # The worker emits its own scrape / auto-apply log lines via the
+        # `log` signal. We surface the latest one as the status text so
+        # the user always sees what stage we're in.
+        # Filter to the worker's own milestone lines (those that start
+        # with "Auto-apply" or "Scrap" or "STOP" or "[run").
+        if any(line.startswith(p) for p in (
+            "Auto-apply",
+            "Scraping ",
+            "Scraped ",
+            "STOP ",
+            "[run ",
+            "[prepare ",
+        )):
+            self._status_label.setText(line)
 
     @Slot(object)
     @safe_slot
-    def _on_prepare_finished(self, rows) -> None:
-        ready = sum(1 for r in self._prepared if r.ready)
-        total = len(self._prepared)
-        if total == 0:
-            self._tally_label.setText(
-                "Prepare: no queued jobs at or above the threshold. "
-                "Scrape more from the Queue screen, or lower the threshold in Settings."
-            )
-        else:
-            self._tally_label.setText(
-                f"Prepare complete: {ready} ready, "
-                f"{total - ready} not-ready of {total} considered."
-            )
-        self._select_all_btn.setEnabled(ready > 0)
-        self._deselect_all_btn.setEnabled(total > 0)
-        self._update_submit_button()
-
-    @Slot()
-    @safe_slot
-    def _on_select_all_clicked(self) -> None:
-        for cb, row in zip(self._row_checkboxes, self._prepared):
-            cb.setChecked(row.ready)
-
-    @Slot()
-    @safe_slot
-    def _on_deselect_all_clicked(self) -> None:
-        for cb in self._row_checkboxes:
-            cb.setChecked(False)
-
-    @Slot()
-    @safe_slot
-    def _on_submit_clicked(self) -> None:
-        urls = self._approved_urls()
-        if not urls:
-            show_error_dialog(
-                self,
-                "Nothing selected",
-                "Tick at least one 'ready' row to submit.",
-            )
-            return
-        live = self._settings.allow_real_submit
-        if live:
-            ok = confirm_dialog(
-                self,
-                "Submit LIVE applications?",
-                f"You are about to file {len(urls)} REAL Seek applications "
-                "under your name. The engine submits one at a time, throttled, "
-                "and STOP will halt the batch after the current job. Proceed?",
-            )
-        else:
-            ok = confirm_dialog(
-                self,
-                "Submit batch (dry-run)?",
-                f"This will dry-run {len(urls)} jobs to submit-ready, one at a "
-                "time, with throttling. No real applications will be filed.",
-            )
-        if not ok:
-            return
-        self._worker.run_batch(
-            urls,
-            allow_real_submit=live,
-            throttle_seconds=self._settings.batch_throttle_seconds,
-        )
-        self._tally_label.setText(
-            f"Running... {len(urls)} jobs. "
-            + ("LIVE submission." if live else "Dry-run.")
-        )
-        self._run_progress.setRange(0, len(urls))
-        self._run_progress.setValue(0)
-        self._run_progress.setVisible(True)
+    def _on_scrape_finished(self, _result) -> None:
+        # Auto-apply has its own batch_apply_progress events; we just
+        # clear stale rows once scrape completes so the table reflects
+        # the new run.
+        self._table.setRowCount(0)
+        self._row_for_url.clear()
+        self._results.clear()
 
     @Slot()
     @safe_slot
     def _on_stop_clicked(self) -> None:
         self._worker.stop_batch()
         self._stop_btn.setEnabled(False)
-        self._tally_label.setText(
-            self._tally_label.text() + "  (STOP requested; finishing current job.)"
+        self._status_label.setText(
+            self._status_label.text() + "  (STOP requested; finishing current job.)"
         )
 
     @Slot(int, int, object)
@@ -409,14 +282,33 @@ class BatchScreen(QWidget):
     def _on_run_progress(
         self, done: int, total: int, result: ApplicationResult
     ) -> None:
+        self._run_progress.setRange(0, total)
         self._run_progress.setValue(done)
-        self._tally_label.setText(self._format_running_tally(done, total))
-        # Mark the row in the table if we can find it.
-        for r_idx, row in enumerate(self._prepared):
-            if row.url == result.job_url:
-                self._row_checkboxes[r_idx].setEnabled(False)
-                self._update_row_status_text(r_idx, result.status.value)
-                break
+        # Append a new row if first sight; update existing row otherwise.
+        url = result.job_url
+        if url not in self._row_for_url:
+            row_idx = self._table.rowCount()
+            self._table.insertRow(row_idx)
+            self._row_for_url[url] = row_idx
+            self._results.append(result)
+        else:
+            row_idx = self._row_for_url[url]
+            self._results[row_idx] = result
+        self._render_row(row_idx, result)
+        self._status_label.setText(self._running_status(done, total, result))
+
+    def _running_status(
+        self, done: int, total: int, result: ApplicationResult
+    ) -> str:
+        verb = {
+            ApplicationStatus.SUBMITTED: "submitted",
+            ApplicationStatus.SUBMITTED_UNCERTAIN: "submitted (uncertain)",
+            ApplicationStatus.DRY_RUN_VERIFIED: "dry-run verified",
+            ApplicationStatus.SKIPPED_LOW_SCORE: "skipped (low score)",
+            ApplicationStatus.FAILED: "failed",
+            ApplicationStatus.CANCELLED: "cancelled",
+        }.get(result.status, result.status.value)
+        return f"Auto-apply: {done}/{total} -- last: {verb}"
 
     @Slot(object)
     @safe_slot
@@ -425,52 +317,51 @@ class BatchScreen(QWidget):
         self._stop_btn.setEnabled(False)
         readout = (
             f"Batch {tally.stop_reason}. "
-            f"Submitted {tally.submitted}, verified {tally.verified}, "
-            f"uncertain {tally.submitted_uncertain} "
-            f"(verify on Seek), failed {tally.failed}, "
+            f"submitted {tally.submitted}, "
+            f"verified {tally.verified}, "
+            f"uncertain {tally.submitted_uncertain} (verify on Seek), "
+            f"failed {tally.failed}, "
             f"dry-run-verified {tally.dry_run_verified}, "
-            f"skipped {tally.skipped_low_score}, cancelled {tally.cancelled}."
+            f"skipped {tally.skipped_low_score}, "
+            f"cancelled {tally.cancelled}."
         )
+        if tally.fatal_reason:
+            readout += f"\nFatal: {tally.fatal_reason}"
         self._tally_label.setText(readout)
+        self._status_label.setText(f"Batch {tally.stop_reason}.")
 
-    def _format_running_tally(self, done: int, total: int) -> str:
-        # Build a quick running count from the per-job results we have seen
-        # so far (not the BatchRunResult, which only arrives at the end).
-        # The signal we just received corresponds to the latest result; we
-        # rely on the worker emitting in order.
-        return f"Running batch... {done}/{total}."
+    @Slot(str, str)
+    @safe_slot
+    def _on_worker_failed(self, op: str, msg: str) -> None:
+        if op.startswith("batch_") or op == "scrape_and_auto_apply":
+            show_error_dialog(self, f"Auto-apply error: {op}", msg)
 
     @Slot(int, int, int, int)
     @safe_slot
     def _on_row_changed(self, cur_row: int, _c: int, _pr: int, _pc: int) -> None:
-        if cur_row < 0 or cur_row >= len(self._prepared):
-            self._detail_header.setText("Select a row to preview.")
-            self._cover_view.clear()
-            self._qa_view.clear()
-            self._error_view.clear()
+        if cur_row < 0 or cur_row >= len(self._results):
+            self._clear_detail()
             return
-        row = self._prepared[cur_row]
-        self._detail_header.setText(
-            f"{row.title} at {row.company}  --  status: {row.status}"
-        )
-        # Cover letter from the dataclass; if absent, try sidecar.
-        cover_text = row.cover_letter_text
-        if cover_text is None and row.cover_pdf is not None:
+        result = self._results[cur_row]
+        self._detail_header.setText(f"{result.job_url}")
+        cover = result.cover_letter_text
+        # Fall back to the sidecar file the adapter writes after tailor.
+        if cover is None and result.cover_pdf is not None:
             for cand in [
-                Path(str(row.cover_pdf) + ".txt"),
-                self._engine_workdir / Path(str(row.cover_pdf) + ".txt"),
+                Path(str(result.cover_pdf) + ".txt"),
+                self._engine_workdir / Path(str(result.cover_pdf) + ".txt"),
             ]:
                 try:
                     if cand.exists():
-                        cover_text = cand.read_text(encoding="utf-8")
+                        cover = cand.read_text(encoding="utf-8")
                         break
                 except Exception:
                     pass
         self._cover_view.setPlainText(
-            cover_text or "(No cover letter available for this row.)"
+            cover or "(No cover letter for this row.)"
         )
 
-        qa = row.screening_answers or []
+        qa = result.screening_answers or []
         if qa:
             lines = [f"# {len(qa)} question(s) answered\n"]
             for q in qa:
@@ -483,75 +374,85 @@ class BatchScreen(QWidget):
         else:
             self._qa_view.setPlainText("(No screening Q & A recorded.)")
 
-        if row.error_message:
+        if result.error_message:
             self._error_view.setPlainText(
-                f"{row.exception_type}: {row.error_message}"
+                f"{result.exception_type or 'error'}: {result.error_message}"
             )
         else:
             self._error_view.setPlainText("(No error.)")
 
-    @Slot(str)
-    @safe_slot
-    def _on_worker_state(self, state: str) -> None:
-        running = state in ("running", "cancelling")
-        self._prepare_btn.setEnabled(not running)
-        self._prepare_cancel_btn.setEnabled(running)
-        self._prepare_progress.setVisible(running)
-        self._stop_btn.setEnabled(running)
-        self._update_submit_button()
+    # ------------------------------------------------------------- helpers
 
-    @Slot(str, str)
-    @safe_slot
-    def _on_worker_failed(self, op: str, msg: str) -> None:
-        if op.startswith("batch_"):
-            show_error_dialog(self, f"Batch error: {op}", msg)
+    def _clear_detail(self) -> None:
+        self._detail_header.setText(
+            "Select a completed row to see its cover letter and Q&A."
+        )
+        self._cover_view.clear()
+        self._qa_view.clear()
+        self._error_view.clear()
 
-    # ----------------------------------------------------------- table
+    def _render_row(self, row_idx: int, result: ApplicationResult) -> None:
+        n = QTableWidgetItem(str(row_idx + 1))
+        n.setTextAlignment(Qt.AlignCenter)
+        self._table.setItem(row_idx, 0, n)
 
-    def _append_table_row(self, row: BatchPreparedJob) -> None:
-        i = self._table.rowCount()
-        self._table.insertRow(i)
-
-        cb = QCheckBox()
-        cb.setEnabled(row.ready)
-        cb.stateChanged.connect(lambda _s: self._update_submit_button())
-        # Center the checkbox inside the cell.
-        wrap = QWidget()
-        hl = QHBoxLayout(wrap)
-        hl.setContentsMargins(0, 0, 0, 0)
-        hl.setAlignment(Qt.AlignCenter)
-        hl.addWidget(cb)
-        self._table.setCellWidget(i, 0, wrap)
-        self._row_checkboxes.append(cb)
-
+        score = result.score
         score_item = QTableWidgetItem(
-            "" if row.score is None else f"{int(row.score):>3}"
+            "" if score is None else f"{int(score):>3}"
         )
         score_item.setTextAlignment(Qt.AlignCenter)
-        score_item.setBackground(_score_colour(row.score))
-        self._table.setItem(i, 1, score_item)
-        self._table.setItem(i, 2, QTableWidgetItem(row.title))
-        self._table.setItem(i, 3, QTableWidgetItem(row.company))
+        score_item.setBackground(_score_colour(score))
+        self._table.setItem(row_idx, 1, score_item)
 
-        status_item = QTableWidgetItem(row.status)
-        status_item.setForeground(_status_colour(row.status))
+        # Title/company come from jobs.db via the result if the adapter
+        # populated them; otherwise fall back to URL slug.
+        title = self._title_for(result)
+        company = self._company_for(result)
+        title_item = QTableWidgetItem(title)
+        title_item.setToolTip(result.job_url)
+        self._table.setItem(row_idx, 2, title_item)
+        self._table.setItem(row_idx, 3, QTableWidgetItem(company))
+
+        status_text = result.status.value
+        status_item = QTableWidgetItem(status_text)
+        status_item.setForeground(_status_colour(result.status))
         font = status_item.font()
         font.setBold(True)
         status_item.setFont(font)
-        self._table.setItem(i, 4, status_item)
-        # URL truncated in column; full visible in tooltip.
-        url_short = row.url.replace("https://au.seek.com/job/", "#")
-        url_item = QTableWidgetItem(url_short)
-        url_item.setToolTip(row.url)
-        self._table.setItem(i, 5, url_item)
+        self._table.setItem(row_idx, 4, status_item)
 
-    def _update_row_status_text(self, idx: int, status: str) -> None:
-        item = self._table.item(idx, 4)
-        if item is not None:
-            item.setText(status)
+    def _title_for(self, result: ApplicationResult) -> str:
+        # apply_to_job's result does not currently carry title/company.
+        # Read them from jobs.db lazily.
+        try:
+            import sqlite3
+            with sqlite3.connect(self._engine_workdir / "jobs.db") as conn:
+                row = conn.execute(
+                    "SELECT title FROM applications WHERE url = ?",
+                    (result.job_url,),
+                ).fetchone()
+                if row and row[0]:
+                    return row[0]
+        except Exception:
+            pass
+        return result.job_url.rsplit("/", 1)[-1]
+
+    def _company_for(self, result: ApplicationResult) -> str:
+        try:
+            import sqlite3
+            with sqlite3.connect(self._engine_workdir / "jobs.db") as conn:
+                row = conn.execute(
+                    "SELECT company FROM applications WHERE url = ?",
+                    (result.job_url,),
+                ).fetchone()
+                if row and row[0]:
+                    return row[0]
+        except Exception:
+            pass
+        return ""
 
 
-# --------------------------------------------------------------------------- colours
+# --------------------------------------------------------------------------- styles
 
 
 def _score_colour(score: int | None) -> QColor:
@@ -564,19 +465,18 @@ def _score_colour(score: int | None) -> QColor:
     return QColor("#fee2e2")
 
 
-def _status_colour(status: str) -> QColor:
-    if status == "ready":
+def _status_colour(status: ApplicationStatus) -> QColor:
+    if status == ApplicationStatus.SUBMITTED:
         return QColor("#15803d")
-    if status == "not_quick_apply":
+    if status == ApplicationStatus.SUBMITTED_UNCERTAIN:
         return QColor("#c2410c")
-    if status == "skipped_low_score":
+    if status == ApplicationStatus.DRY_RUN_VERIFIED:
+        return QColor("#1d4ed8")
+    if status in (ApplicationStatus.SKIPPED_LOW_SCORE,):
         return QColor("#6b7280")
-    if status == "cancelled":
+    if status == ApplicationStatus.CANCELLED:
         return QColor("#374151")
     return QColor("#b91c1c")
-
-
-# --------------------------------------------------------------------------- style
 
 
 def _h1() -> QFont:
@@ -593,11 +493,11 @@ def _h2() -> QFont:
     return f
 
 
-def _primary_btn() -> str:
+def _stop_btn_css() -> str:
     return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 8px 16px; "
+        "QPushButton { background: #b91c1c; color: white; padding: 8px 16px; "
         "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; color: #e0e7ff; }"
+        "QPushButton:disabled { background: #fecaca; color: #fff; }"
     )
 
 

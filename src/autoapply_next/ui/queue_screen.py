@@ -45,6 +45,11 @@ class QueueScreen(QWidget):
     """Emitted with a Seek URL when the user picks a row to run. MainWindow
     catches this and switches to the Run screen with the URL preloaded."""
 
+    auto_apply_started = Signal()
+    """Emitted when a scrape-and-auto-apply pass has been kicked off. The
+    MainWindow swaps to the Batch screen so the user can see live progress
+    and reach STOP."""
+
     def __init__(
         self,
         *,
@@ -102,9 +107,16 @@ class QueueScreen(QWidget):
         self._keyword_input.returnPressed.connect(self._on_refresh_clicked)
         h.addWidget(self._keyword_input, stretch=1)
 
-        self._refresh_btn = QPushButton("Scrape and score")
+        self._refresh_btn = QPushButton("Scrape and apply")
         self._refresh_btn.setMinimumWidth(180)
         self._refresh_btn.setStyleSheet(_primary_btn())
+        self._refresh_btn.setToolTip(
+            "Scrape Seek for the keyword, then automatically apply to "
+            "every queued job at or above the threshold in score-desc "
+            "order. LIVE if the Settings gate is on; dry-run otherwise. "
+            "Cap and pacing match job-finder (max 100 per run, "
+            "60-120s between jobs). STOP on the Batch screen."
+        )
         self._refresh_btn.clicked.connect(self._on_refresh_clicked)
         h.addWidget(self._refresh_btn)
 
@@ -183,13 +195,24 @@ class QueueScreen(QWidget):
                 self,
                 "Keyword needed",
                 "Type a search keyword (for example 'platform engineer') "
-                "before clicking Scrape and score.",
+                "before clicking Scrape and apply.",
             )
             self._keyword_input.setFocus()
             return
         self._settings.last_scrape_keyword = kw
-        self._count_label.setText(f"Scraping Seek for '{kw}'...")
-        self._worker.scrape_and_score(kw)
+        mode = "LIVE" if self._settings.allow_real_submit else "dry-run"
+        self._count_label.setText(
+            f"Scraping Seek for '{kw}', then auto-applying ({mode})..."
+        )
+        self._worker.scrape_and_auto_apply(
+            kw,
+            allow_real_submit=self._settings.allow_real_submit,
+            throttle_seconds=self._settings.batch_throttle_seconds,
+            daily_cap=self._settings.daily_cap,
+        )
+        # Hand off to the Batch screen so the user can see live progress
+        # and reach the STOP button without hunting for it.
+        self.auto_apply_started.emit()
 
     @Slot(str)
     def _on_log(self, line: str) -> None:

@@ -158,170 +158,356 @@ def test_match_threshold_default_is_ten(tmp_path):
     )
 
 
-def test_prepare_populates_table_and_enables_select_all(
-    qtbot, workdir, worker, settings, stub_batch
+# The six tests that used to live here exercised the manual Prepare /
+# Select-all / Deselect-all / Submit-N-dry-run / Submit-N-LIVE-confirm
+# flow on BatchScreen. That UI was removed when the user asked for
+# auto-apply on scrape (no more per-job review tick, no more Submit
+# button); BatchScreen is now a status-only monitor and the trigger
+# lives on QueueScreen's "Scrape and apply" button. The replacement
+# tests below cover the new contract: the worker's chained runner, the
+# BatchScreen status table populating from batch_apply_progress, and
+# the STOP-via-auto-apply path.
+
+
+def test_scrape_and_auto_apply_chains_scrape_then_run_batch(
+    qtbot, workdir, worker, monkeypatch
 ):
-    screen = BatchScreen(
-        engine_workdir=workdir, worker=worker, settings=settings
-    )
-    qtbot.addWidget(screen)
-    with qtbot.waitSignal(worker.batch_prepare_finished, timeout=3000):
-        screen._on_prepare_clicked()
-    # 3 rows from the stub.
-    assert screen._table.rowCount() == 3
-    # Two ready, one not_quick_apply.
-    assert sum(1 for r in screen._prepared if r.ready) == 2
-    # Select-all button now enabled because there are ready rows.
-    assert screen._select_all_btn.isEnabled()
+    """The worker's new chained runner: scrape (Phase 1) emits
+    scrape_finished, then auto-apply (Phase 2) calls run_batch and emits
+    batch_apply_finished. The chain happens inside a single worker task
+    so the worker stays 'running' across both phases."""
+    import sqlite3
 
+    # Seed jobs.db so queued_urls_for_batch returns something.
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "url TEXT PRIMARY KEY, title TEXT, company TEXT, board TEXT, "
+            "match_score INTEGER, match_reasoning TEXT, resume_file TEXT, "
+            "cover_letter_file TEXT, status TEXT, notes TEXT, "
+            "timestamp TEXT, failure_count INTEGER)"
+        )
+        for url, score in [
+            ("https://au.seek.com/job/HI", 80),
+            ("https://au.seek.com/job/LO", 5),
+        ]:
+            conn.execute(
+                "INSERT OR REPLACE INTO applications "
+                "(url, title, company, board, match_score, status, timestamp, "
+                " failure_count) VALUES (?,?,?,?,?,?,?,0)",
+                (url, "t", "c", "seek", score, "queued", "t"),
+            )
 
-def test_select_all_only_ticks_ready_rows(
-    qtbot, workdir, worker, settings, stub_batch
-):
-    screen = BatchScreen(
-        engine_workdir=workdir, worker=worker, settings=settings
-    )
-    qtbot.addWidget(screen)
-    with qtbot.waitSignal(worker.batch_prepare_finished, timeout=3000):
-        screen._on_prepare_clicked()
-    screen._on_select_all_clicked()
-    qtbot.wait(20)
-    checked = [cb.isChecked() for cb in screen._row_checkboxes]
-    statuses = [r.status for r in screen._prepared]
-    # ready (True), not_quick_apply (False), ready (True)
-    assert checked == [True, False, True]
-    assert statuses == ["ready", "not_quick_apply", "ready"]
+    async def fake_scrape(**_kw):
+        from autoapply_next.engine.scraping import ScrapeResult
+        return ScrapeResult(
+            keyword="kw", total_scraped=0, new_jobs=0, scored=[], errors=[],
+        )
 
+    seen_urls: list[str] = []
 
-def test_deselect_all_unticks(qtbot, workdir, worker, settings, stub_batch):
-    screen = BatchScreen(
-        engine_workdir=workdir, worker=worker, settings=settings
-    )
-    qtbot.addWidget(screen)
-    with qtbot.waitSignal(worker.batch_prepare_finished, timeout=3000):
-        screen._on_prepare_clicked()
-    screen._on_select_all_clicked()
-    qtbot.wait(20)
-    screen._on_deselect_all_clicked()
-    qtbot.wait(20)
-    assert not any(cb.isChecked() for cb in screen._row_checkboxes)
+    async def fake_run(*, job_urls, tally=None, **_kw):
+        if tally is None:
+            tally = BatchRunResult()
+        for u in job_urls:
+            seen_urls.append(u)
+            tally.per_job.append(ApplicationResult(
+                job_url=u, status=ApplicationStatus.DRY_RUN_VERIFIED,
+            ))
+            tally.dry_run_verified += 1
+        return tally
 
+    monkeypatch.setattr(worker_module, "scrape_and_score", fake_scrape)
+    monkeypatch.setattr(worker_module, "run_batch", fake_run)
 
-def test_submit_button_label_tracks_count_and_gate(
-    qtbot, workdir, worker, settings, stub_batch
-):
-    screen = BatchScreen(
-        engine_workdir=workdir, worker=worker, settings=settings
-    )
-    qtbot.addWidget(screen)
-    with qtbot.waitSignal(worker.batch_prepare_finished, timeout=3000):
-        screen._on_prepare_clicked()
-    # 0 selected.
-    assert "Submit 0" in screen._submit_btn.text()
-    assert not screen._submit_btn.isEnabled()
-    # Select all.
-    screen._on_select_all_clicked()
-    qtbot.wait(20)
-    assert "Submit 2" in screen._submit_btn.text()
-    assert "dry-run" in screen._submit_btn.text().lower()
-    assert screen._submit_btn.isEnabled()
-    # Flip the gate WITHOUT going through the modal confirmation: directly
-    # set the setting. The label must update.
-    settings.allow_real_submit = True
-    qtbot.wait(20)
-    assert "live" in screen._submit_btn.text().lower()
+    finished: list[BatchRunResult] = []
+    worker.batch_apply_finished.connect(finished.append)
 
-
-def test_run_only_submits_approved_in_dry_run(
-    qtbot, workdir, worker, settings, stub_batch, monkeypatch
-):
-    # Confirmation dialog returns Yes without showing UI.
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        staticmethod(lambda *a, **kw: QMessageBox.Yes),
-    )
-    screen = BatchScreen(
-        engine_workdir=workdir, worker=worker, settings=settings
-    )
-    qtbot.addWidget(screen)
-    with qtbot.waitSignal(worker.batch_prepare_finished, timeout=3000):
-        screen._on_prepare_clicked()
-    # Only select Job A (not Job C). Job B is non-ready, untickable.
-    screen._row_checkboxes[0].setChecked(True)
-    qtbot.wait(20)
     with qtbot.waitSignal(worker.batch_apply_finished, timeout=5000):
-        screen._on_submit_clicked()
+        worker.scrape_and_auto_apply(
+            "kw", allow_real_submit=False, throttle_seconds=0,
+        )
 
-    # The synthetic run was called with exactly the approved set.
-    assert len(stub_batch["run_calls"]) == 1
-    call = stub_batch["run_calls"][0]
-    assert call["urls"] == ["https://au.seek.com/job/A"]
-    assert call["allow_real_submit"] is False
-    # The "live submit" sentinel was never reached.
-    assert stub_batch["submit_invoked"] is False
+    # match_threshold default is 10 so the HI(80) row is eligible and the
+    # LO(5) row is filtered out by persistence.queued_urls_for_batch.
+    assert seen_urls == ["https://au.seek.com/job/HI"]
+    assert finished and finished[0].dry_run_verified == 1
 
 
-def test_stop_halts_batch_between_jobs(
-    qtbot, workdir, worker, settings, stub_batch, monkeypatch
+def test_scrape_and_auto_apply_no_eligible_jobs_emits_empty_tally(
+    qtbot, workdir, worker, monkeypatch
 ):
-    """STOP sets the worker's stop-batch event and the synthetic run_batch
-    honors it between iterations. We verify by approving 3 jobs (only 2 are
-    'ready' so we have to tick all readies + force-tick the non-ready row
-    by going through a longer stub). Easier: replace the stub to make each
-    job sleep so we can stop after the first."""
+    """Phase 1 succeeds but Phase 1.5 finds no queued rows above
+    threshold. The worker emits batch_apply_finished with an empty
+    BatchRunResult; it does NOT call run_batch."""
+    import sqlite3
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "url TEXT PRIMARY KEY, title TEXT, company TEXT, board TEXT, "
+            "match_score INTEGER, match_reasoning TEXT, resume_file TEXT, "
+            "cover_letter_file TEXT, status TEXT, notes TEXT, "
+            "timestamp TEXT, failure_count INTEGER)"
+        )
 
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        staticmethod(lambda *a, **kw: QMessageBox.Yes),
+    async def fake_scrape(**_kw):
+        from autoapply_next.engine.scraping import ScrapeResult
+        return ScrapeResult(
+            keyword="kw", total_scraped=0, new_jobs=0, scored=[], errors=[],
+        )
+
+    called = {"run_batch": False}
+
+    async def fake_run(**_kw):
+        called["run_batch"] = True
+        return BatchRunResult()
+
+    monkeypatch.setattr(worker_module, "scrape_and_score", fake_scrape)
+    monkeypatch.setattr(worker_module, "run_batch", fake_run)
+
+    with qtbot.waitSignal(worker.batch_apply_finished, timeout=3000):
+        worker.scrape_and_auto_apply(
+            "kw", allow_real_submit=False, throttle_seconds=0,
+        )
+
+    assert called["run_batch"] is False, (
+        "no eligible jobs must NOT call run_batch (avoid empty-batch noise)"
     )
 
-    # Override the run stub with a slower one that lets us stop mid-batch.
-    seen_jobs: list[str] = []
 
-    async def slow_run(*, job_urls, engine_workdir, allow_real_submit,
-                       on_progress, is_cancelled, is_stopped,
-                       throttle_range_seconds=(0, 0), tally=None, **_kw):
-        # Updated for D's Contract 5: tally is owned by the caller and
-        # mutated in place; throttle is a (min, max) tuple now.
+def test_scrape_and_auto_apply_caps_at_max_jobs(
+    qtbot, workdir, worker, monkeypatch
+):
+    """Worker caps the URL list at max_jobs (default MAX_APPLIES_PER_RUN
+    from job-finder = 100). Smaller cap passed here for fast tests."""
+    import sqlite3
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "url TEXT PRIMARY KEY, title TEXT, company TEXT, board TEXT, "
+            "match_score INTEGER, match_reasoning TEXT, resume_file TEXT, "
+            "cover_letter_file TEXT, status TEXT, notes TEXT, "
+            "timestamp TEXT, failure_count INTEGER)"
+        )
+        for i in range(7):
+            conn.execute(
+                "INSERT INTO applications (url, title, company, board, "
+                "match_score, status, timestamp, failure_count) "
+                "VALUES (?,?,?,?,?,?,?,0)",
+                (f"https://au.seek.com/job/{i}", "t", "c", "seek",
+                 50, "queued", f"t{i}"),
+            )
+
+    async def fake_scrape(**_kw):
+        from autoapply_next.engine.scraping import ScrapeResult
+        return ScrapeResult(
+            keyword="kw", total_scraped=0, new_jobs=0, scored=[], errors=[],
+        )
+
+    seen: list[list[str]] = []
+
+    async def fake_run(*, job_urls, tally=None, **_kw):
+        seen.append(list(job_urls))
+        if tally is None:
+            tally = BatchRunResult()
+        return tally
+
+    monkeypatch.setattr(worker_module, "scrape_and_score", fake_scrape)
+    monkeypatch.setattr(worker_module, "run_batch", fake_run)
+
+    with qtbot.waitSignal(worker.batch_apply_finished, timeout=5000):
+        worker.scrape_and_auto_apply(
+            "kw", allow_real_submit=False, throttle_seconds=0,
+            max_jobs=3,  # cap below the 7 eligible
+        )
+
+    assert seen and len(seen[0]) == 3
+
+
+def test_auto_apply_passes_gate_through_to_run_batch(
+    qtbot, workdir, worker, monkeypatch
+):
+    """The Settings allow_real_submit flag flows verbatim to run_batch.
+    LIVE on the gate -> allow_real_submit=True. No extra confirmation
+    inside the worker (the Settings flip is the single confirmation)."""
+    import sqlite3
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "url TEXT PRIMARY KEY, title TEXT, company TEXT, board TEXT, "
+            "match_score INTEGER, match_reasoning TEXT, resume_file TEXT, "
+            "cover_letter_file TEXT, status TEXT, notes TEXT, "
+            "timestamp TEXT, failure_count INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO applications (url, title, company, board, "
+            "match_score, status, timestamp, failure_count) "
+            "VALUES (?,?,?,?,?,?,?,0)",
+            ("https://au.seek.com/job/X", "t", "c", "seek", 80, "queued", "t"),
+        )
+
+    async def fake_scrape(**_kw):
+        from autoapply_next.engine.scraping import ScrapeResult
+        return ScrapeResult(
+            keyword="kw", total_scraped=0, new_jobs=0, scored=[], errors=[],
+        )
+
+    captured = {"allow_real_submit": None}
+
+    async def fake_run(*, allow_real_submit, tally=None, **_kw):
+        captured["allow_real_submit"] = allow_real_submit
+        if tally is None:
+            tally = BatchRunResult()
+        return tally
+
+    monkeypatch.setattr(worker_module, "scrape_and_score", fake_scrape)
+    monkeypatch.setattr(worker_module, "run_batch", fake_run)
+
+    with qtbot.waitSignal(worker.batch_apply_finished, timeout=3000):
+        worker.scrape_and_auto_apply(
+            "kw", allow_real_submit=True, throttle_seconds=0,
+        )
+
+    assert captured["allow_real_submit"] is True
+
+
+def test_stop_halts_auto_apply_between_jobs(
+    qtbot, workdir, worker, monkeypatch
+):
+    """STOP set after the first per-job result lands; the runner's
+    is_stopped() flag halts before the next URL. Remaining URLs stay
+    'queued' in jobs.db (proven by D's contract; here we just assert
+    the stub did not receive the third URL)."""
+    import sqlite3
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "url TEXT PRIMARY KEY, title TEXT, company TEXT, board TEXT, "
+            "match_score INTEGER, match_reasoning TEXT, resume_file TEXT, "
+            "cover_letter_file TEXT, status TEXT, notes TEXT, "
+            "timestamp TEXT, failure_count INTEGER)"
+        )
+        for i, url in enumerate(["A", "B", "C"]):
+            conn.execute(
+                "INSERT INTO applications (url, title, company, board, "
+                "match_score, status, timestamp, failure_count) "
+                "VALUES (?,?,?,?,?,?,?,0)",
+                (f"https://au.seek.com/job/{url}", "t", "c", "seek",
+                 80, "queued", f"t{i}"),
+            )
+
+    async def fake_scrape(**_kw):
+        from autoapply_next.engine.scraping import ScrapeResult
+        return ScrapeResult(
+            keyword="kw", total_scraped=0, new_jobs=0, scored=[], errors=[],
+        )
+
+    seen: list[str] = []
+
+    async def slow_run(*, job_urls, on_progress, is_stopped,
+                       tally=None, **_kw):
         if tally is None:
             tally = BatchRunResult()
         for i, url in enumerate(job_urls, 1):
             if is_stopped():
                 tally.stop_reason = "user_stop"
                 return tally
-            seen_jobs.append(url)
+            seen.append(url)
             result = ApplicationResult(
                 job_url=url, status=ApplicationStatus.DRY_RUN_VERIFIED,
             )
             tally.per_job.append(result)
             tally.dry_run_verified += 1
             on_progress(i, len(job_urls), result)
-            # Sleep briefly so the test can call stop() between iterations.
             await asyncio.sleep(0.1)
         return tally
 
+    monkeypatch.setattr(worker_module, "scrape_and_score", fake_scrape)
     monkeypatch.setattr(worker_module, "run_batch", slow_run)
 
-    screen = BatchScreen(
-        engine_workdir=workdir, worker=worker, settings=settings
-    )
-    qtbot.addWidget(screen)
-    with qtbot.waitSignal(worker.batch_prepare_finished, timeout=3000):
-        screen._on_prepare_clicked()
-    screen._on_select_all_clicked()
-    qtbot.wait(20)
+    finished: list[BatchRunResult] = []
+    worker.batch_apply_finished.connect(finished.append)
 
+    # Kick off auto-apply.
     with qtbot.waitSignal(worker.batch_apply_progress, timeout=3000):
-        screen._on_submit_clicked()
-    # Now we have processed the first job. Stop the batch.
-    screen._on_stop_clicked()
-
+        worker.scrape_and_auto_apply(
+            "kw", allow_real_submit=False, throttle_seconds=0,
+        )
+    # First per-job result has landed; call STOP.
+    worker.stop_batch()
     with qtbot.waitSignal(worker.batch_apply_finished, timeout=3000):
         pass
 
-    # Exactly 1 job processed (the first one) before stop took effect.
-    assert len(seen_jobs) == 1
-    assert seen_jobs[0] == "https://au.seek.com/job/A"
+    assert len(seen) == 1, f"only the first URL should have been seen; got {seen}"
+    assert finished[0].stop_reason == "user_stop"
+
+
+def test_batch_screen_table_populates_from_apply_progress(
+    qtbot, workdir, worker, settings
+):
+    """BatchScreen no longer has Prepare/Submit/Select-all/Deselect-all.
+    Its table now populates from batch_apply_progress events directly."""
+    screen = BatchScreen(
+        engine_workdir=workdir, worker=worker, settings=settings,
+    )
+    qtbot.addWidget(screen)
+    # No row checkboxes attribute on the new screen; assert removal.
+    assert not hasattr(screen, "_row_checkboxes")
+    assert not hasattr(screen, "_submit_btn")
+    assert not hasattr(screen, "_prepare_btn")
+    assert not hasattr(screen, "_select_all_btn")
+    # STOP button is present and disabled while idle.
+    assert screen._stop_btn.text() == "STOP batch"
+    assert screen._stop_btn.isEnabled() is False
+    # Fire two batch_apply_progress events; assert 2 rows show up.
+    worker.batch_apply_progress.emit(
+        1, 2,
+        ApplicationResult(job_url="https://au.seek.com/job/1",
+                          status=ApplicationStatus.DRY_RUN_VERIFIED),
+    )
+    worker.batch_apply_progress.emit(
+        2, 2,
+        ApplicationResult(job_url="https://au.seek.com/job/2",
+                          status=ApplicationStatus.FAILED,
+                          error_message="boom",
+                          exception_type="RuntimeError"),
+    )
+    qtbot.wait(50)
+    assert screen._table.rowCount() == 2
+
+
+def test_queue_emits_auto_apply_started_signal(
+    qtbot, workdir, worker, settings, monkeypatch
+):
+    """QueueScreen.run_clicked must now (a) call worker.scrape_and_auto_apply
+    not the old scrape_and_score, and (b) emit auto_apply_started so
+    MainWindow can swap to the Batch screen."""
+    from autoapply_next.ui.queue_screen import QueueScreen
+
+    called = {"scrape_and_auto_apply": 0, "scrape_and_score": 0}
+
+    def fake_auto(self, kw, *, allow_real_submit, throttle_seconds=0,
+                  daily_cap=0, **_kw):
+        called["scrape_and_auto_apply"] += 1
+
+    def fake_score(self, kw, location="Australia"):
+        called["scrape_and_score"] += 1
+
+    monkeypatch.setattr(EngineWorker, "scrape_and_auto_apply", fake_auto)
+    monkeypatch.setattr(EngineWorker, "scrape_and_score", fake_score)
+
+    screen = QueueScreen(
+        engine_workdir=workdir, worker=worker, settings=settings,
+    )
+    qtbot.addWidget(screen)
+    screen._keyword_input.setText("aws")
+    started: list[bool] = []
+    screen.auto_apply_started.connect(lambda: started.append(True))
+    screen._on_refresh_clicked()
+    qtbot.wait(30)
+    assert called["scrape_and_auto_apply"] == 1
+    assert called["scrape_and_score"] == 0
+    assert started == [True]
 
 
 def test_failed_and_not_quick_apply_rows_tallied_and_not_retried(
@@ -383,33 +569,12 @@ def test_failed_and_not_quick_apply_rows_tallied_and_not_retried(
     assert tally.stop_reason == "completed"
 
 
-def test_run_with_live_submit_gate_requires_confirmation(
-    qtbot, workdir, worker, settings, stub_batch, monkeypatch
-):
-    """If the user cancels the LIVE confirmation, the worker is NOT called."""
-    settings.allow_real_submit = True
-    qtbot.wait(20)
-
-    monkeypatch.setattr(
-        QMessageBox, "question",
-        staticmethod(lambda *a, **kw: QMessageBox.Cancel),
-    )
-
-    screen = BatchScreen(
-        engine_workdir=workdir, worker=worker, settings=settings
-    )
-    qtbot.addWidget(screen)
-    with qtbot.waitSignal(worker.batch_prepare_finished, timeout=3000):
-        screen._on_prepare_clicked()
-    screen._on_select_all_clicked()
-    qtbot.wait(20)
-    screen._on_submit_clicked()
-    qtbot.wait(50)
-    assert stub_batch["run_calls"] == [], (
-        "Cancel on LIVE confirmation must not call run_batch"
-    )
-    # And the sentinel for the real engine path is also clean.
-    assert stub_batch["submit_invoked"] is False
+# test_run_with_live_submit_gate_requires_confirmation removed.
+# The per-batch LIVE-submit confirmation lived on the Submit button which
+# no longer exists (auto-apply flow). The single confirmation now lives on
+# the Settings checkbox itself, covered by
+# tests/ui_tests/test_interaction_audit.py::test_settings_real_submit_cancel_does_not_flip
+# and test_settings_real_submit_confirm_flips_and_back_off_without_prompt.
 
 
 # --------------------------------------------------------------- prepare DB integration

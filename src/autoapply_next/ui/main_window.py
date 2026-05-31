@@ -93,6 +93,9 @@ class MainWindow(QMainWindow):
 
         # Wire Queue -> Run handoff: selecting a row swaps to Run with URL preloaded.
         self._queue.run_requested.connect(self._on_queue_run_requested)
+        # Scrape-and-apply: the moment auto-apply kicks off, swap to the
+        # Batch screen so the user can see live progress and reach STOP.
+        self._queue.auto_apply_started.connect(self._on_auto_apply_started)
         # Sign-in is a stub; the Skip button emits `authenticated` and we
         # respond by routing to the Seek session screen, the natural next step.
         self._signin.authenticated.connect(self._on_signin_authenticated)
@@ -225,6 +228,12 @@ class MainWindow(QMainWindow):
     def _on_queue_run_requested(self, url: str) -> None:
         self._run.set_url(url)
         self._goto(self._run)
+
+    @Slot()
+    @safe_slot
+    def _on_auto_apply_started(self) -> None:
+        # Hand off Queue -> Batch so the user lands on STOP + live progress.
+        self._goto(self._batch)
 
     @Slot(str)
     @safe_slot
