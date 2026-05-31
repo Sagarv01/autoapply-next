@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .hooks import EngineHooks
+from .persistence import persist_apply_outcome
 from .progress import ProgressEvent, ProgressStage
 from .results import ApplicationResult, ApplicationStatus
 from .safety import DryRunReached, SafetyGate
@@ -286,14 +287,20 @@ async def apply_to_job(
                 try:
                     job, is_quick = await _peek_and_fetch_listing(job_url)
                 except Exception as exc:
-                    return _failure(job_url, "peek", exc, progress)
+                    return _failure(
+                        job_url, "peek", exc, progress,
+                        engine_workdir=engine_workdir,
+                    )
                 logger.info("peek took %.1fs", time.monotonic() - t0)
 
                 if not is_quick:
                     err = JobNotQuickApplyError(
                         f"Job is not a Seek quick-apply listing: {job_url}"
                     )
-                    return _failure(job_url, "peek", err, progress)
+                    return _failure(
+                        job_url, "peek", err, progress,
+                        engine_workdir=engine_workdir,
+                    )
 
                 # ---------- SCORE ----------
                 check_cancel("score")
@@ -306,7 +313,9 @@ async def apply_to_job(
                     score, reasoning = await matcher.score_job(job)
                 except Exception as exc:
                     return _failure(
-                        job_url, "score", exc, progress, score=None
+                        job_url, "score", exc, progress,
+                        engine_workdir=engine_workdir,
+                        score=None,
                     )
                 progress(
                     ProgressEvent(
@@ -322,12 +331,17 @@ async def apply_to_job(
                         score,
                         match_threshold,
                     )
-                    return ApplicationResult(
+                    skipped_result = ApplicationResult(
                         job_url=job_url,
                         status=ApplicationStatus.SKIPPED_LOW_SCORE,
                         score=score,
                         reasoning=reasoning,
                     )
+                    persist_apply_outcome(
+                        engine_workdir=engine_workdir,
+                        result=skipped_result,
+                    )
+                    return skipped_result
 
                 # ---------- TAILOR ----------
                 check_cancel("tailor")
@@ -347,6 +361,7 @@ async def apply_to_job(
                         "tailor",
                         exc,
                         progress,
+                        engine_workdir=engine_workdir,
                         score=score,
                         reasoning=reasoning,
                     )
@@ -430,7 +445,7 @@ async def apply_to_job(
                             },
                         )
                     )
-                    return ApplicationResult(
+                    final_result = ApplicationResult(
                         job_url=job_url,
                         status=final_status,
                         score=score,
@@ -446,6 +461,14 @@ async def apply_to_job(
                             vstate.detail if vstate else None
                         ),
                     )
+                    # Persist BEFORE returning, so a downstream signal
+                    # handler crashing or a STOP click between jobs in a
+                    # batch can never lose what already went out.
+                    persist_apply_outcome(
+                        engine_workdir=engine_workdir,
+                        result=final_result,
+                    )
+                    return final_result
                 except DryRunReached as dry:
                     hooks.read_last_journal()
                     progress(
@@ -461,6 +484,10 @@ async def apply_to_job(
                             },
                         )
                     )
+                    # DRY_RUN_VERIFIED does NOT change jobs.db status (the
+                    # row stays 'queued' so the batch prepare can keep
+                    # re-considering it). persist_apply_outcome is a no-op
+                    # for this status; we deliberately do not call it.
                     return ApplicationResult(
                         job_url=job_url,
                         status=ApplicationStatus.DRY_RUN_VERIFIED,
@@ -482,6 +509,7 @@ async def apply_to_job(
                         "apply",
                         exc,
                         progress,
+                        engine_workdir=engine_workdir,
                         score=score,
                         reasoning=reasoning,
                         resume_pdf=Path(resume_pdf),
@@ -503,6 +531,7 @@ def _failure(
     exc: Exception,
     progress: ProgressCallback,
     *,
+    engine_workdir: Path | None = None,
     score: int | None = None,
     reasoning: str | None = None,
     resume_pdf: Path | None = None,
@@ -526,7 +555,7 @@ def _failure(
         )
     )
     logger.exception("apply_to_job failed at stage=%s", stage)
-    return ApplicationResult(
+    failure_result = ApplicationResult(
         job_url=job_url,
         status=ApplicationStatus.FAILED,
         score=score,
@@ -540,6 +569,16 @@ def _failure(
         verify_outcome=verify_outcome,
         verify_detail=verify_detail,
     )
+    # Persist immediately: a FAILED result with verify NOT_APPLIED becomes
+    # 'failed' in jobs.db; a peek-stage JobNotQuickApplyError becomes
+    # 'skipped'. Either way, the row is no longer eligible for an auto
+    # batch prepare to pick up again.
+    if engine_workdir is not None:
+        persist_apply_outcome(
+            engine_workdir=engine_workdir,
+            result=failure_result,
+        )
+    return failure_result
 
 
 def _load_candidate(config_yaml_path: Path) -> dict:

@@ -90,13 +90,16 @@ class BatchRunResult:
     full object is returned at the end."""
 
     submitted: int = 0
-    """Engine returned ApplicationStatus.SUBMITTED. The engine's verifier
+    """Engine returned ApplicationStatus.SUBMITTED. The robust verifier
     confirmed the application on the Applied Jobs page."""
     verified: int = 0
-    """Alias for submitted (the engine returns SUBMITTED only after
-    `_verify_applied` succeeds). Tracked separately so UI can show both
-    'attempted' and 'verified' if/when those diverge after a verifier
-    behaviour change."""
+    """Same as `submitted` (the engine returns SUBMITTED only after the
+    verifier confirms). Kept separate so the tally can distinguish
+    'attempted' from 'verified' if behaviour ever diverges."""
+    submitted_uncertain: int = 0
+    """ApplicationStatus.SUBMITTED_UNCERTAIN: the engine sent a click but
+    the verifier could not confirm. **Never auto-retried.** User must
+    check Seek's Applied Jobs page manually."""
     failed: int = 0
     skipped_low_score: int = 0
     dry_run_verified: int = 0
@@ -347,6 +350,8 @@ async def run_batch(
         if result.status == ApplicationStatus.SUBMITTED:
             tally.submitted += 1
             tally.verified += 1
+        elif result.status == ApplicationStatus.SUBMITTED_UNCERTAIN:
+            tally.submitted_uncertain += 1
         elif result.status == ApplicationStatus.DRY_RUN_VERIFIED:
             tally.dry_run_verified += 1
         elif result.status == ApplicationStatus.SKIPPED_LOW_SCORE:

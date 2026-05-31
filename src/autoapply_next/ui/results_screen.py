@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import webbrowser
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Slot
@@ -31,6 +32,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from ..engine.persistence import CannotRequeueError, requeue_job
+from ..safe_ui import confirm_dialog, safe_slot, show_error_dialog
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,31 @@ class ResultsScreen(QWidget):
         self._meta_label.setStyleSheet("color: #6b7280;")
         self._meta_label.setWordWrap(True)
         v.addWidget(self._meta_label)
+
+        # Row of contextual action buttons: enabled only when valid for
+        # the selected row's status. Re-queue only for 'failed'; verify
+        # on Seek only for 'submitted_uncertain'.
+        action_row = QHBoxLayout()
+        self._requeue_btn = QPushButton("Manually re-queue")
+        self._requeue_btn.setEnabled(False)
+        self._requeue_btn.setToolTip(
+            "Move a 'failed' row back to 'queued' so it can be picked up "
+            "by the next batch. Only enabled for 'failed' rows; "
+            "'submitted_uncertain' must be verified on Seek by hand."
+        )
+        self._requeue_btn.clicked.connect(self._on_requeue_clicked)
+        action_row.addWidget(self._requeue_btn)
+        self._verify_btn = QPushButton("Verify on Seek")
+        self._verify_btn.setEnabled(False)
+        self._verify_btn.setToolTip(
+            "Open Seek's Applied Jobs page in your browser to check by hand. "
+            "Used for 'submitted_uncertain' rows: the engine clicked submit "
+            "but could not confirm. Re-queueing is intentionally blocked."
+        )
+        self._verify_btn.clicked.connect(self._on_verify_clicked)
+        action_row.addWidget(self._verify_btn)
+        action_row.addStretch(1)
+        v.addLayout(action_row)
 
         self._tabs = QTabWidget()
 
@@ -191,6 +220,9 @@ class ResultsScreen(QWidget):
             f"Score: {row.get('match_score')} | Status: {row.get('status')} | "
             f"When: {row.get('timestamp')}\n{row.get('url')}"
         )
+        status = (row.get("status") or "").lower()
+        self._requeue_btn.setEnabled(status == "failed")
+        self._verify_btn.setEnabled(status == "submitted_uncertain")
 
         # Cover letter from sidecar.
         cover_pdf = row.get("cover_letter_file")
@@ -273,6 +305,45 @@ class ResultsScreen(QWidget):
         self._cover_view.clear()
         self._qa_view.clear()
         self._raw_view.clear()
+        self._requeue_btn.setEnabled(False)
+        self._verify_btn.setEnabled(False)
+
+    def _current_row(self) -> dict | None:
+        idx = self._table.currentRow()
+        if idx < 0 or idx >= len(self._rows):
+            return None
+        return self._rows[idx]
+
+    @Slot()
+    @safe_slot
+    def _on_requeue_clicked(self) -> None:
+        row = self._current_row()
+        if row is None:
+            return
+        url = row.get("url") or ""
+        confirmed = confirm_dialog(
+            self,
+            "Re-queue this failed job?",
+            "This moves the row from 'failed' back to 'queued' so the next "
+            f"batch can try again. Nothing was filed last time.\n\n{url}",
+        )
+        if not confirmed:
+            return
+        try:
+            requeue_job(engine_workdir=self._engine_workdir, url=url)
+        except CannotRequeueError as exc:
+            show_error_dialog(self, "Cannot re-queue", str(exc))
+            return
+        self._refresh()
+
+    @Slot()
+    @safe_slot
+    def _on_verify_clicked(self) -> None:
+        # Open Seek's Applied Jobs page in the user's normal browser so
+        # they can verify by eye. Deliberately not the job listing URL
+        # (the listing won't show "applied" status), and deliberately
+        # not the engine's automated browser (the verifier already tried).
+        webbrowser.open("https://au.seek.com/my-activity/applied-jobs")
 
     def _find_journal(self, url: str | None) -> dict | None:
         if url is None or not self._journal_path.exists():

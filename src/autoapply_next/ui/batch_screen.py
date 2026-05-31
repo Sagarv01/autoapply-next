@@ -426,7 +426,9 @@ class BatchScreen(QWidget):
         readout = (
             f"Batch {tally.stop_reason}. "
             f"Submitted {tally.submitted}, verified {tally.verified}, "
-            f"failed {tally.failed}, dry-run-verified {tally.dry_run_verified}, "
+            f"uncertain {tally.submitted_uncertain} "
+            f"(verify on Seek), failed {tally.failed}, "
+            f"dry-run-verified {tally.dry_run_verified}, "
             f"skipped {tally.skipped_low_score}, cancelled {tally.cancelled}."
         )
         self._tally_label.setText(readout)
