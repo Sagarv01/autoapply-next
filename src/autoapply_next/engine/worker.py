@@ -515,16 +515,128 @@ class EngineWorker(QObject):
         daily_cap: int,
         max_jobs: int,
     ) -> None:
-        """Worker-side chained runner. Mirrors job-finder/main.py:
-        Phase 1 scrape; Phase 1.5 select score-desc; Phase 2 apply.
+        """Worker-side chained runner. Mirrors vendor/job-finder/main.py
+        lines 289-413 (Phase 0 -> Phase 1 -> Phase 2).
 
-        On exit the worker emits batch_apply_finished with the TRUE tally
-        (Contract 5), even on cancellation / fatal halt."""
+          Phase 0: apply every job already 'queued' in jobs.db
+                   (score-desc, eligibility filter), BEFORE scraping.
+                   Job-finder calls this 'recover_orphans + queued' and
+                   does it FIRST because scraping when there is already
+                   queued work is wasteful and risks anti-bot detection.
+          Phase 1: scrape Seek for `keyword`, only if Phase 0 did not
+                   exhaust the per-run apply budget.
+          Phase 2: apply newly-eligible queued (the new scraped rows).
+
+        Cap accounting: total applies across phases is capped at
+        `max_jobs` (mirrors job-finder MAX_APPLIES_PER_RUN). If Phase 0
+        hits the cap, Phase 1 and Phase 2 are skipped entirely.
+
+        Every milestone uses logger.info so the log file shows the flow
+        even when the Qt log signal isn't being captured by a listener.
+        """
         self._current_task = asyncio.current_task()
         tally = BatchRunResult()
+        applies_this_run = 0  # tracked across Phase 0 + Phase 2
+
         try:
             try:
-                # Phase 1: scrape. Same path as scrape_and_score.
+                # ---------------------------------------------- Phase 0
+                # Apply jobs already queued in jobs.db FIRST. Score-desc;
+                # eligibility filter is queued_urls_for_batch (status='queued'
+                # AND score >= threshold AND failure_count < PERMAFAIL).
+                phase0_urls = queued_urls_for_batch(
+                    engine_workdir=self._engine_workdir,
+                    min_score=self._match_threshold,
+                )
+                phase0_urls = phase0_urls[:max_jobs]
+                mode = "LIVE" if allow_real_submit else "dry-run"
+                lower = max(60, int(throttle_seconds))
+                throttle_range = (lower, lower + 60)
+
+                def on_progress(done, total, result):
+                    self.batch_apply_progress.emit(done, total, result)
+                    msg = f"[run {done}/{total}] {result.status.value}"
+                    if result.error_message:
+                        msg += f": {result.error_message}"
+                    self.log.emit(msg)
+                    logger.info(msg)
+
+                if phase0_urls:
+                    logger.info(
+                        "Phase 0: %d queued job(s) at score >= %d (%s); "
+                        "throttle %ds-%ds, cap remaining=%d. "
+                        "Scraping deferred until queue is cleared.",
+                        len(phase0_urls), self._match_threshold, mode,
+                        throttle_range[0], throttle_range[1],
+                        max_jobs - applies_this_run,
+                    )
+                    self.log.emit(
+                        f"Phase 0 ({mode}): clearing queue first, "
+                        f"{len(phase0_urls)} job(s) at score >= "
+                        f"{self._match_threshold}. Scrape deferred."
+                    )
+                    await run_batch(
+                        job_urls=phase0_urls,
+                        engine_workdir=self._engine_workdir,
+                        allow_real_submit=allow_real_submit,
+                        on_progress=on_progress,
+                        is_cancelled=self._cancel_event.is_set,
+                        is_stopped=self._stop_batch_event.is_set,
+                        throttle_range_seconds=throttle_range,
+                        tally=tally,
+                        fatal_classifier=is_fatal_condition,
+                        max_consecutive_failures=3,
+                        daily_cap=daily_cap,
+                    )
+                    applies_this_run = len(tally.per_job)
+                    logger.info(
+                        "Phase 0 complete: %d processed, stop_reason=%s.",
+                        applies_this_run, tally.stop_reason,
+                    )
+
+                    # Bail out early if Phase 0 already tripped the circuit
+                    # breaker or hit the cap; do not waste a scrape on top.
+                    if tally.stop_reason and tally.stop_reason not in (
+                        "completed",
+                    ):
+                        logger.info(
+                            "Skipping scrape (Phase 0 stopped with reason=%s).",
+                            tally.stop_reason,
+                        )
+                        self.batch_apply_finished.emit(tally)
+                        return
+                    if applies_this_run >= max_jobs:
+                        logger.info(
+                            "Skipping scrape (Phase 0 hit cap %d).", max_jobs
+                        )
+                        tally.stop_reason = "cap_reached_phase_0"
+                        self.batch_apply_finished.emit(tally)
+                        return
+                else:
+                    logger.info(
+                        "Phase 0: no queued jobs at score >= %d. "
+                        "Proceeding straight to scrape.",
+                        self._match_threshold,
+                    )
+
+                # Close engine's _PeekSession before Phase 1 so the
+                # scraper can take the seek_chrome_profile lock
+                # (job-finder pattern, see vendor/main.py:302-303).
+                await _close_peek_session_safely()
+
+                if self._cancel_event.is_set() or self._stop_batch_event.is_set():
+                    tally.stop_reason = (
+                        "cancelled" if self._cancel_event.is_set() else "user_stop"
+                    )
+                    logger.info("Pre-scrape exit: %s", tally.stop_reason)
+                    self.batch_apply_finished.emit(tally)
+                    return
+
+                # ---------------------------------------------- Phase 1
+                logger.info(
+                    "Phase 1: scraping Seek for keyword=%r (location=%r)",
+                    keyword, location,
+                )
                 scrape_result = await scrape_and_score(
                     keyword=keyword,
                     location=location,
@@ -533,49 +645,56 @@ class EngineWorker(QObject):
                     is_cancelled=self._cancel_event.is_set,
                 )
                 self.scrape_finished.emit(scrape_result)
+                logger.info(
+                    "Phase 1 complete: scraped %d, scored %d new "
+                    "(errors=%d).",
+                    scrape_result.total_scraped,
+                    len(scrape_result.scored),
+                    len(scrape_result.errors),
+                )
+
                 if self._cancel_event.is_set() or self._stop_batch_event.is_set():
                     tally.stop_reason = (
                         "cancelled" if self._cancel_event.is_set() else "user_stop"
                     )
+                    logger.info("Post-scrape exit: %s", tally.stop_reason)
                     self.batch_apply_finished.emit(tally)
                     return
 
-                # Phase 1.5: enumerate eligible queued URLs in score-desc
-                # order, capped at max_jobs (mirrors MAX_APPLIES_PER_RUN).
-                urls = queued_urls_for_batch(
+                # Close _PeekSession after Phase 1 too, for symmetry; the
+                # apply path will reopen it. Cheap if already closed.
+                await _close_peek_session_safely()
+
+                # ---------------------------------------------- Phase 2
+                phase2_urls = queued_urls_for_batch(
                     engine_workdir=self._engine_workdir,
                     min_score=self._match_threshold,
                 )
-                urls = urls[:max_jobs]
-                if not urls:
-                    self.log.emit(
-                        f"Auto-apply: no queued jobs at score >= "
-                        f"{self._match_threshold}; nothing to do."
+                # Cap remaining = max_jobs - already-applied across run.
+                remaining = max(0, max_jobs - applies_this_run)
+                phase2_urls = phase2_urls[:remaining]
+                if not phase2_urls:
+                    logger.info(
+                        "Phase 2: no new eligible queued jobs after scrape; "
+                        "done."
                     )
+                    if not tally.stop_reason:
+                        tally.stop_reason = "completed"
                     self.batch_apply_finished.emit(tally)
                     return
-                mode = "LIVE" if allow_real_submit else "dry-run"
-                self.log.emit(
-                    f"Auto-apply ({mode}): {len(urls)} job(s) at score "
-                    f">= {self._match_threshold}, score-desc, "
-                    f"throttle {throttle_seconds}-{throttle_seconds + 60}s, "
-                    f"cap {max_jobs}, STOP available on Batch screen."
+                logger.info(
+                    "Phase 2: applying %d newly-eligible job(s) (%s); "
+                    "throttle %ds-%ds, cap remaining=%d.",
+                    len(phase2_urls), mode,
+                    throttle_range[0], throttle_range[1],
+                    remaining,
                 )
-
-                # Phase 2: apply. Same run_batch contract as the manual
-                # batch flow; safety gate, circuit breaker, persistence,
-                # tally all unchanged.
-                def on_progress(done, total, result):
-                    self.batch_apply_progress.emit(done, total, result)
-                    msg = f"[run {done}/{total}] {result.status.value}"
-                    if result.error_message:
-                        msg += f": {result.error_message}"
-                    self.log.emit(msg)
-
-                lower = max(60, int(throttle_seconds))
-                throttle_range = (lower, lower + 60)
+                self.log.emit(
+                    f"Phase 2 ({mode}): {len(phase2_urls)} new job(s) "
+                    f"after scrape."
+                )
                 await run_batch(
-                    job_urls=urls,
+                    job_urls=phase2_urls,
                     engine_workdir=self._engine_workdir,
                     allow_real_submit=allow_real_submit,
                     on_progress=on_progress,
@@ -587,9 +706,15 @@ class EngineWorker(QObject):
                     max_consecutive_failures=3,
                     daily_cap=daily_cap,
                 )
+                logger.info(
+                    "Phase 2 complete: total %d per_job entries, "
+                    "stop_reason=%s.",
+                    len(tally.per_job), tally.stop_reason,
+                )
                 self.batch_apply_finished.emit(tally)
             except asyncio.CancelledError:
                 tally.stop_reason = "cancelled"
+                logger.info("scrape_and_auto_apply cancelled (CancelledError)")
                 self.batch_apply_finished.emit(tally)
             except Exception as exc:
                 logger.exception("EngineWorker: scrape+apply crashed")
@@ -649,3 +774,22 @@ class EngineWorker(QObject):
     def _get_state(self) -> str:
         with self._state_lock:
             return self._state
+
+
+# ---------------------------------------------------------------------- helpers
+
+
+async def _close_peek_session_safely() -> None:
+    """Close the engine's `seek_apply._PeekSession` if open, swallowing any
+    error. Mirrors job-finder's `from seek_apply import _PeekSession;
+    await _PeekSession.close()` calls between Phase 0 / 1 / 2 so the
+    Chromium SingletonLock on `sessions/seek_chrome_profile/` releases
+    before the next phase tries to launch its own context.
+
+    Safe to call when no _PeekSession is active. Engine source is not
+    edited; we only import the existing close() classmethod."""
+    try:
+        import seek_apply  # type: ignore[import-not-found]
+        await seek_apply._PeekSession.close()
+    except Exception as exc:
+        logger.debug("_close_peek_session_safely: %s (ignored)", exc)

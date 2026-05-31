@@ -202,7 +202,8 @@ class QueueScreen(QWidget):
         self._settings.last_scrape_keyword = kw
         mode = "LIVE" if self._settings.allow_real_submit else "dry-run"
         self._count_label.setText(
-            f"Scraping Seek for '{kw}', then auto-applying ({mode})..."
+            f"Clearing queue first ({mode}), then scraping '{kw}', "
+            "then applying new jobs..."
         )
         self._worker.scrape_and_auto_apply(
             kw,

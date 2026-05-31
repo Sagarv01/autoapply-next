@@ -169,16 +169,22 @@ def test_match_threshold_default_is_ten(tmp_path):
 # the STOP-via-auto-apply path.
 
 
-def test_scrape_and_auto_apply_chains_scrape_then_run_batch(
+def test_scrape_and_auto_apply_chains_phase0_scrape_phase2(
     qtbot, workdir, worker, monkeypatch
 ):
-    """The worker's new chained runner: scrape (Phase 1) emits
-    scrape_finished, then auto-apply (Phase 2) calls run_batch and emits
-    batch_apply_finished. The chain happens inside a single worker task
-    so the worker stays 'running' across both phases."""
+    """The new chained runner mirrors job-finder's order:
+    Phase 0 (apply queued FIRST) -> Phase 1 (scrape) -> Phase 2 (apply new).
+
+    Job-finder explicitly clears the queue before scraping; this test
+    pins that order. Because the stub doesn't mutate jobs.db, the same
+    queued row is visible in BOTH Phase 0 and Phase 2 eligibility
+    checks; we assert run_batch is called twice and the URL appears
+    twice (once per phase). In production, persist_apply_outcome would
+    flip the row to 'applied' after Phase 0 so Phase 2 would not see
+    it; that integration is covered by test_integration_resilience.py.
+    """
     import sqlite3
 
-    # Seed jobs.db so queued_urls_for_batch returns something.
     with sqlite3.connect(workdir / "jobs.db") as conn:
         conn.execute(
             "CREATE TABLE IF NOT EXISTS applications ("
@@ -198,40 +204,100 @@ def test_scrape_and_auto_apply_chains_scrape_then_run_batch(
                 (url, "t", "c", "seek", score, "queued", "t"),
             )
 
+    order: list[str] = []  # 'phase 0 run', 'scrape', 'phase 2 run'
+
     async def fake_scrape(**_kw):
+        order.append("scrape")
         from autoapply_next.engine.scraping import ScrapeResult
         return ScrapeResult(
             keyword="kw", total_scraped=0, new_jobs=0, scored=[], errors=[],
         )
 
-    seen_urls: list[str] = []
+    run_calls: list[list[str]] = []
 
     async def fake_run(*, job_urls, tally=None, **_kw):
+        run_calls.append(list(job_urls))
+        order.append(f"run({len(job_urls)})")
         if tally is None:
             tally = BatchRunResult()
         for u in job_urls:
-            seen_urls.append(u)
             tally.per_job.append(ApplicationResult(
                 job_url=u, status=ApplicationStatus.DRY_RUN_VERIFIED,
             ))
             tally.dry_run_verified += 1
+        tally.stop_reason = "completed"
         return tally
 
     monkeypatch.setattr(worker_module, "scrape_and_score", fake_scrape)
     monkeypatch.setattr(worker_module, "run_batch", fake_run)
-
-    finished: list[BatchRunResult] = []
-    worker.batch_apply_finished.connect(finished.append)
 
     with qtbot.waitSignal(worker.batch_apply_finished, timeout=5000):
         worker.scrape_and_auto_apply(
             "kw", allow_real_submit=False, throttle_seconds=0,
         )
 
-    # match_threshold default is 10 so the HI(80) row is eligible and the
-    # LO(5) row is filtered out by persistence.queued_urls_for_batch.
-    assert seen_urls == ["https://au.seek.com/job/HI"]
-    assert finished and finished[0].dry_run_verified == 1
+    # The order MUST be Phase 0 run -> scrape -> Phase 2 run, never
+    # scrape -> run.
+    assert order[0].startswith("run("), order
+    assert "scrape" in order
+    assert order.index("scrape") > 0, (
+        f"scrape ran before Phase 0; order={order}"
+    )
+    # HI is eligible (score 80 >= 10), LO is not (score 5 < 10).
+    for call in run_calls:
+        assert call == ["https://au.seek.com/job/HI"], call
+
+
+def test_scrape_skipped_when_phase0_trips_circuit(
+    qtbot, workdir, worker, monkeypatch
+):
+    """If Phase 0 stops for any reason other than 'completed' (fatal,
+    consecutive failures, daily cap, user STOP), skip scraping and
+    Phase 2 entirely. No point scraping if we cannot apply more."""
+    import sqlite3
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "url TEXT PRIMARY KEY, title TEXT, company TEXT, board TEXT, "
+            "match_score INTEGER, match_reasoning TEXT, resume_file TEXT, "
+            "cover_letter_file TEXT, status TEXT, notes TEXT, "
+            "timestamp TEXT, failure_count INTEGER)"
+        )
+        conn.execute(
+            "INSERT INTO applications (url, title, company, board, "
+            "match_score, status, timestamp, failure_count) "
+            "VALUES (?,?,?,?,?,?,?,0)",
+            ("https://au.seek.com/job/X", "t", "c", "seek", 80, "queued", "t"),
+        )
+
+    scrape_called = {"n": 0}
+
+    async def fake_scrape(**_kw):
+        scrape_called["n"] += 1
+        from autoapply_next.engine.scraping import ScrapeResult
+        return ScrapeResult(
+            keyword="kw", total_scraped=0, new_jobs=0, scored=[], errors=[],
+        )
+
+    async def fake_run(*, job_urls, tally=None, **_kw):
+        if tally is None:
+            tally = BatchRunResult()
+        # Simulate a fatal halt mid-Phase-0.
+        tally.stop_reason = "fatal:Seek session expired"
+        tally.fatal_reason = "Seek session expired"
+        return tally
+
+    monkeypatch.setattr(worker_module, "scrape_and_score", fake_scrape)
+    monkeypatch.setattr(worker_module, "run_batch", fake_run)
+
+    with qtbot.waitSignal(worker.batch_apply_finished, timeout=3000):
+        worker.scrape_and_auto_apply(
+            "kw", allow_real_submit=False, throttle_seconds=0,
+        )
+
+    assert scrape_called["n"] == 0, (
+        "scrape must NOT run after a fatal Phase 0 halt"
+    )
 
 
 def test_scrape_and_auto_apply_no_eligible_jobs_emits_empty_tally(
