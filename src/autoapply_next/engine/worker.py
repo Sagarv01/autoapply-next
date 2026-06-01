@@ -470,8 +470,17 @@ class EngineWorker(QObject):
         # lower bound to at least 60s, then upper = lower + 60s. With the
         # default worker setting of 20, this becomes (60, 120) which is the
         # spirit of the engine pacing.
-        lower = max(60, int(throttle_seconds))
-        throttle_range = (lower, lower + 60)
+        #
+        # `throttle_seconds <= 0` is the explicit opt-out from the Settings
+        # checkbox "Pace between applies". Pass (0, 0) all the way through
+        # to run_batch (which calls random.uniform(0, 0) = 0 and asyncio
+        # sleeps for it) so applies run back-to-back. This bypasses
+        # job-finder's anti-bot pacing -- the user owns the risk.
+        if int(throttle_seconds) <= 0:
+            throttle_range = (0, 0)
+        else:
+            lower = max(60, int(throttle_seconds))
+            throttle_range = (lower, lower + 60)
         try:
             try:
                 def on_progress(done, total, result):
@@ -550,8 +559,12 @@ class EngineWorker(QObject):
                 )
                 phase0_urls = phase0_urls[:max_jobs]
                 mode = "LIVE" if allow_real_submit else "dry-run"
-                lower = max(60, int(throttle_seconds))
-                throttle_range = (lower, lower + 60)
+                # See `_batch_run_runner` for the (0, 0) opt-out contract.
+                if int(throttle_seconds) <= 0:
+                    throttle_range = (0, 0)
+                else:
+                    lower = max(60, int(throttle_seconds))
+                    throttle_range = (lower, lower + 60)
 
                 def on_progress(done, total, result):
                     self.batch_apply_progress.emit(done, total, result)

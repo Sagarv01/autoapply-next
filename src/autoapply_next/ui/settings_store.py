@@ -42,6 +42,12 @@ DEFAULTS: dict[str, object] = {
     # anti-bot. The engine daemon historically waited 30 to 90s; for the
     # interactive batch we default lower because the user is watching.
     "batch_throttle_seconds": 20,
+    # When True (default, recommended), live submissions wait 60-120s
+    # between each other, mirroring job-finder's APPLY_GAP_MIN/MAX. When
+    # False, applies run back-to-back with no pause. This is a deliberate
+    # opt-out: skipping the throttle increases the chance Seek's anti-bot
+    # heuristics flag the account. Surface as a checkbox in Settings.
+    "pace_between_applies": True,
 }
 
 
@@ -50,6 +56,7 @@ class SettingsStore(QObject):
     match_threshold_changed = Signal(int)
     daily_cap_changed = Signal(int)
     selected_job_url_changed = Signal(str)
+    pace_between_applies_changed = Signal(bool)
 
     def __init__(self, path: Path):
         super().__init__()
@@ -144,6 +151,30 @@ class SettingsStore(QObject):
             return
         self._data["batch_throttle_seconds"] = value
         self._save()
+
+    @property
+    def pace_between_applies(self) -> bool:
+        """If True (default), the worker enforces a 60-120s random gap
+        between live applies (job-finder APPLY_GAP_MIN/MAX parity). If
+        False the worker passes throttle 0 to run_batch and applies
+        run back-to-back. Off is a deliberate opt-out: skipping the
+        pace makes Seek's anti-bot heuristics more likely to flag the
+        account."""
+        return bool(self._data.get("pace_between_applies", True))
+
+    @pace_between_applies.setter
+    def pace_between_applies(self, value: bool) -> None:
+        value = bool(value)
+        if value == self.pace_between_applies:
+            return
+        self._data["pace_between_applies"] = value
+        self._save()
+        self.pace_between_applies_changed.emit(value)
+        logger.info(
+            "SettingsStore: pace_between_applies set to %s%s",
+            value,
+            "" if value else " (no throttle between applies)",
+        )
 
     # --------------------------------------------------------------- io
 

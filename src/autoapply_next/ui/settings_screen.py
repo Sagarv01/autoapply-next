@@ -154,9 +154,26 @@ class SettingsScreen(QWidget):
         )
         form.addRow("Daily application cap:", self._cap_spin)
 
+        self._pace_box = QCheckBox(
+            "Pace between applies (60-120s, recommended)"
+        )
+        self._pace_box.setChecked(self._settings.pace_between_applies)
+        self._pace_box.setToolTip(
+            "On (default): the worker waits 60-120s between live "
+            "submissions, mirroring job-finder's anti-bot pacing. "
+            "Off: applies run back-to-back with no pause. Faster, but "
+            "Seek is more likely to flag the account."
+        )
+        self._pace_box.toggled.connect(
+            lambda v: setattr(self._settings, "pace_between_applies", v)
+        )
+        form.addRow("Throttle:", self._pace_box)
+
         note = QLabel(
             "Threshold determines when a scraped job would be skipped at apply "
-            "time. The daily cap is stored but not yet enforced (informational only)."
+            "time. The daily cap is stored but not yet enforced (informational "
+            "only). Throttle off means applies fire back-to-back; leave on "
+            "unless you know why you are turning it off."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #6b7280; font-size: 12px;")

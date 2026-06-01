@@ -205,10 +205,19 @@ class QueueScreen(QWidget):
             f"Clearing queue first ({mode}), then scraping '{kw}', "
             "then applying new jobs..."
         )
+        # `pace_between_applies` is the user-facing kill-switch for the
+        # 60-120s throttle. When OFF, send 0 to the worker so applies run
+        # back-to-back. When ON, send the stored seconds value (the
+        # worker floors to 60 anyway for anti-bot baseline).
+        effective_throttle = (
+            self._settings.batch_throttle_seconds
+            if self._settings.pace_between_applies
+            else 0
+        )
         self._worker.scrape_and_auto_apply(
             kw,
             allow_real_submit=self._settings.allow_real_submit,
-            throttle_seconds=self._settings.batch_throttle_seconds,
+            throttle_seconds=effective_throttle,
             daily_cap=self._settings.daily_cap,
         )
         # Hand off to the Batch screen so the user can see live progress
