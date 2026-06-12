@@ -22,3 +22,22 @@ This directory contains pinned copies of third-party / sibling-project code that
 4. Update this file with the new HEAD and date.
 5. Run the contract test suite (`pytest tests/contract`). All must pass before merging.
 6. Note any adapter changes required as a new ADR.
+
+## Re-vendor history
+
+### 2026-06-12: surgical re-pin of `seek_apply.py`
+
+`seek_apply.py` only was re-copied verbatim from the live source
+(`/Users/sagarverma/Pictures/Claude-experiments/job-finder/seek_apply.py`,
+2384 lines) to bring the candidate screening-facts layer
+(`_load_candidate_facts` + `CAND_*` globals, the developed
+citizenship/work-rights handler, `_claude_salary_estimate` and the
+target-aware `_pick_salary_option`). All other vendored files stay at the
+2026-05-29 pin. This is a deliberate, ADR-recorded re-vendor of a single
+file, not an in-place edit. Rationale, the scope decision, and the seam
+verification are in `docs/adr/0009-revendor-seek-apply-candidate-facts.md`.
+
+Verified: the two patched seams (`_submit`, `_verify_applied`) plus
+`_tick_terms_checkbox` and `_scrape_applied_cards` are byte-identical to
+the prior pin; the SafetyGate selector list is unchanged; all 214
+non-live tests pass before and after the copy.

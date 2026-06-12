@@ -23,6 +23,37 @@ USER_DATA_DIR = Path("sessions/seek_chrome_profile").resolve()
 APPLY_TIMEOUT = 180  # seconds
 
 
+def _load_candidate_facts() -> dict:
+    try:
+        import yaml
+        with open("config.yaml") as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg.get("candidate", {})
+    except Exception as e:
+        logger.warning(f"Could not load candidate facts from config.yaml: {e}")
+        return {}
+
+
+_CANDIDATE = _load_candidate_facts()
+CAND_LOCATION = str(_CANDIDATE.get("location", "Sydney"))
+CAND_GENDER = str(_CANDIDATE.get("gender", "Male")).lower()
+CAND_VISA_LABEL = str(_CANDIDATE.get("visa_label", "485 Temporary Graduate Visa"))
+CAND_VISA_EXPIRY = str(_CANDIDATE.get("visa_expiry", "8 July 2028"))
+CAND_SALARY_TEXT = str(_CANDIDATE.get("salary_text", "Negotiable"))
+CAND_SALARY_TARGET = int(_CANDIDATE.get("salary_target_aud", 110_000))
+CAND_NOTICE_PERIOD = str(_CANDIDATE.get("notice_period", "Immediately available"))
+CAND_WORK_ARRANGEMENT = str(_CANDIDATE.get("work_arrangement", "any")).lower()
+CAND_DRIVERS_LICENCE = bool(_CANDIDATE.get("has_drivers_licence", True))
+CAND_OWN_CAR = bool(_CANDIDATE.get("has_own_car", False))
+CAND_RELOCATE = bool(_CANDIDATE.get("willing_to_relocate", True))
+CAND_ABORIGINAL = bool(_CANDIDATE.get("identifies_aboriginal", False))
+CAND_DISABILITY = bool(_CANDIDATE.get("has_disability", False))
+CAND_VETERAN = bool(_CANDIDATE.get("is_veteran", False))
+CAND_YEARS_EXPERIENCE = str(_CANDIDATE.get("years_experience", "5+"))
+CAND_EDUCATION = str(_CANDIDATE.get("highest_education", "Bachelor's degree"))
+CAND_EMPLOYMENT_STATUS = str(_CANDIDATE.get("employment_status", "between_jobs"))
+
+
 class SeekApplyError(Exception):
     pass
 
@@ -192,7 +223,7 @@ async def apply_seek_quick(
         logger.info("Step 1: uploading documents")
         await _upload_resume(page, resume_path, resume_name)
         await _upload_cover_letter(page, cover_path, cover_name)
-        await asyncio.sleep(5)  # let Seek finish processing both uploads before continuing
+        await asyncio.sleep(2.5)  # let Seek finish processing both uploads before continuing (halved)
         await _click_continue(page)
 
         # ── Step 2+: Handle all intermediate steps until Review ───────────
@@ -351,7 +382,7 @@ async def _upload_resume(page: Page, resume_path: str, resume_name: str):
     if await file_input.count() == 0:
         raise ExternalApplyError("No resume file input found — not a Quick Apply form")
     await file_input.set_input_files(resume_path)
-    await asyncio.sleep(7)  # give Seek time to begin server-side upload before checking
+    await asyncio.sleep(3.5)  # give Seek time to begin server-side upload before checking (halved)
 
     # Verify the exact new filename appears — no generic fallback
     await _wait_for_upload_confirmation(page, resume_name, "resume", timeout=10)
@@ -369,7 +400,7 @@ async def _upload_cover_letter(page: Page, cover_path: str, cover_name: str):
     file_input = page.locator('#coverLetter-fileFile')
     if await file_input.count():
         await file_input.set_input_files(cover_path)
-        await asyncio.sleep(7)  # give Seek time to begin server-side upload before checking
+        await asyncio.sleep(3.5)  # give Seek time to begin server-side upload before checking (halved)
 
     await _wait_for_upload_confirmation(page, cover_name, "cover letter")
 
@@ -396,7 +427,7 @@ async def _wait_for_upload_confirmation(page: Page, filename: str, label: str, t
         content = (await page.content()).lower()
         if stem in content:
             logger.info(f"  ✅ {label} confirmed: {filename}")
-            await asyncio.sleep(25)  # wait for Seek to finish server-side processing
+            await asyncio.sleep(12.5)  # wait for Seek to finish server-side processing (halved)
             return
         await asyncio.sleep(1)
 
@@ -481,19 +512,69 @@ async def _handle_form_step(page: Page, job: JobListing, candidate: dict):
 
     # Also handle radio/checkbox questions (employer screening)
     radio_groups = await page.evaluate("""() => {
+        // Find the question heading for a group of inputs. Tries, in order:
+        //   1. Enclosing <fieldset>'s <legend> (canonical HTML pattern).
+        //   2. Enclosing <fieldset>'s aria-labelledby reference.
+        //   3. Any ancestor's aria-labelledby reference.
+        //   4. Walks up ancestors and scans preceding siblings for a heading
+        //      element (<legend>, <strong>, role="heading") or short text.
+        const headingTextNear = (el) => {
+            const fs = el.closest('fieldset');
+            if (fs) {
+                const lg = fs.querySelector(':scope > legend');
+                if (lg && lg.innerText?.trim()) return lg.innerText.trim();
+                const lbid = fs.getAttribute('aria-labelledby');
+                if (lbid) {
+                    const lb = document.getElementById(lbid);
+                    if (lb && lb.innerText?.trim()) return lb.innerText.trim();
+                }
+            }
+            // Walk up looking for any ancestor with aria-labelledby.
+            let aria_node = el;
+            for (let d = 0; d < 10 && aria_node; d++) {
+                const lbid = aria_node.getAttribute?.('aria-labelledby');
+                if (lbid) {
+                    const lb = document.getElementById(lbid);
+                    if (lb && lb.innerText?.trim()) return lb.innerText.trim();
+                }
+                aria_node = aria_node.parentElement;
+            }
+            // Walk up and scan preceding siblings for headings.
+            let node = el;
+            for (let depth = 0; depth < 10 && node; depth++) {
+                let sib = node.previousElementSibling;
+                while (sib) {
+                    const h = sib.querySelector?.('legend, strong, [role="heading"]')
+                           || (sib.matches?.('legend, strong, [role="heading"]') ? sib : null);
+                    if (h && h.innerText?.trim()) return h.innerText.trim();
+                    if (sib.querySelector && !sib.querySelector('input, textarea, select')) {
+                        const t = sib.innerText?.trim();
+                        if (t && t.length > 0 && t.length < 250 && !t.includes('\\n\\n')) {
+                            return t;
+                        }
+                    }
+                    sib = sib.previousElementSibling;
+                }
+                node = node.parentElement;
+            }
+            return '';
+        };
         const radios = document.querySelectorAll('input[type=radio]');
         const groups = {};
         radios.forEach(r => {
             if (!r.offsetParent) return;
             const name = r.name;
-            if (!groups[name]) groups[name] = [];
+            if (!groups[name]) {
+                // Derive group heading from the first radio of each group.
+                groups[name] = { label: headingTextNear(r), options: [] };
+            }
             const lbl = document.querySelector(`label[for="${r.id}"]`);
-            groups[name].push({
+            groups[name].options.push({
                 id: r.id, value: r.value, checked: r.checked,
                 label: lbl?.innerText?.trim() || r.value,
             });
         });
-        return Object.entries(groups).map(([name, options]) => ({name, options}));
+        return Object.entries(groups).map(([name, g]) => ({name, ...g}));
     }""")
 
     for group in radio_groups:
@@ -521,12 +602,32 @@ async def _handle_form_step(page: Page, job: JobListing, candidate: dict):
             if (cb.id) return `[id="${cb.id}"]`;
             return null;
         };
-        // Find the question heading text for a checkbox. Seek's apply form
-        // typically renders the question as a <strong> (or <legend>) in a
-        // sibling element that PRECEDES the options container. We walk up
-        // the input's ancestor chain and, at each level, scan preceding
-        // siblings for that heading element.
+        // Find the question heading text for a checkbox. Tries, in order:
+        //   1. Enclosing <fieldset>'s <legend>.
+        //   2. Enclosing <fieldset>'s aria-labelledby reference.
+        //   3. Any ancestor's aria-labelledby reference.
+        //   4. Walks up the ancestor chain and scans preceding siblings for
+        //      a heading element or short label-like text.
         const headingTextNear = (cb) => {
+            const fs = cb.closest('fieldset');
+            if (fs) {
+                const lg = fs.querySelector(':scope > legend');
+                if (lg && lg.innerText?.trim()) return lg.innerText.trim();
+                const lbid = fs.getAttribute('aria-labelledby');
+                if (lbid) {
+                    const lb = document.getElementById(lbid);
+                    if (lb && lb.innerText?.trim()) return lb.innerText.trim();
+                }
+            }
+            let aria_node = cb;
+            for (let d = 0; d < 10 && aria_node; d++) {
+                const lbid = aria_node.getAttribute?.('aria-labelledby');
+                if (lbid) {
+                    const lb = document.getElementById(lbid);
+                    if (lb && lb.innerText?.trim()) return lb.innerText.trim();
+                }
+                aria_node = aria_node.parentElement;
+            }
             let node = cb;
             for (let depth = 0; depth < 10 && node; depth++) {
                 let sib = node.previousElementSibling;
@@ -535,8 +636,6 @@ async def _handle_form_step(page: Page, job: JobListing, candidate: dict):
                         'legend, strong, [role="heading"]'
                     ) || (sib.matches?.('legend, strong, [role="heading"]') ? sib : null);
                     if (h && h.innerText?.trim()) return h.innerText.trim();
-                    // Also accept any sibling whose text content is a short
-                    // labelish string (no inputs inside it).
                     if (sib.querySelector && !sib.querySelector('input, textarea, select')) {
                         const t = sib.innerText?.trim();
                         if (t && t.length > 0 && t.length < 250 && !t.includes('\\n\\n')) {
@@ -609,10 +708,53 @@ async def _handle_form_step(page: Page, job: JobListing, candidate: dict):
         await _answer_checkbox_groups(page, checkbox_groups)
 
 
-async def _pick_salary_option(page: Page, field_id: str, options: list):
-    """Pick the salary range option closest to $110,000 AUD (market rate for Sagar's profile)."""
+async def _claude_salary_estimate(job: JobListing) -> int | None:
+    """Ask Claude to propose a fair AUD base salary for THIS role and company,
+    using the job description and the company name as context. Returns the
+    integer AUD figure, or None on any failure (caller falls back to config).
+    """
+    try:
+        from utils import extract_json
+        jd = (job.description or "").strip()[:4000]
+        prompt = (
+            "Estimate a fair base salary expectation (AUD per year) the candidate "
+            "should state in this job application's screening form.\n\n"
+            f"Job title: {job.title}\n"
+            f"Company: {job.company}\n"
+            f"Candidate is based in {CAND_LOCATION}, Australia.\n\n"
+            f"--- JOB DESCRIPTION ---\n{jd or '(none provided)'}\n--- END JD ---\n\n"
+            f"Candidate context: {CAND_YEARS_EXPERIENCE} years AWS / DevOps / Cloud / "
+            "Applied AI experience. Master of IT (UTS). 485 Temporary Graduate Visa. "
+            "Minimum acceptable: AUD $75,000.\n\n"
+            "Use the job description's seniority signals, scope, and tech stack, plus "
+            "what you know about the company's market rates in Australia, to pick a "
+            "realistic mid-band asking figure that the employer is likely to accept "
+            "without flagging the candidate as out-of-band. Avoid round-only figures "
+            "like 100000 / 200000; pick something specific (e.g. 132000, 148000).\n\n"
+            'Reply with ONLY valid JSON: {"aud": <integer>}. No fences, no prose.'
+        )
+        text = await claude_complete(
+            system="You estimate salary expectations from job context. Reply with ONLY JSON.",
+            user=prompt,
+            model=DEFAULT_MODEL,
+        )
+        data = extract_json(text.strip())
+        aud = int(data["aud"])
+        if aud < 30_000 or aud > 500_000:
+            logger.warning(f"    Claude salary estimate {aud} out of sanity range; ignoring")
+            return None
+        logger.info(f"    Claude salary estimate for {job.title} @ {job.company}: AUD ${aud:,}")
+        return aud
+    except Exception as e:
+        logger.warning(f"    Claude salary estimate failed ({e})")
+        return None
+
+
+async def _pick_salary_option(page: Page, field_id: str, options: list, target: int | None = None):
+    """Pick the salary-range dropdown option closest to `target` (AUD).
+    Falls back to CAND_SALARY_TARGET when no target is supplied."""
     import re
-    TARGET = 110_000
+    TARGET = target if target is not None else CAND_SALARY_TARGET
 
     best_value = None
     best_distance = float("inf")
@@ -737,24 +879,29 @@ async def _answer_field(page: Page, q: dict, job: JobListing, candidate: dict):
                     pass
         return
     elif any(w in label for w in ["salary", "expected", "remuneration", "compensation", "pay rate"]):
+        # Claude picks a salary from the JD + company; falls back to config on failure.
+        claude_target = await _claude_salary_estimate(job)
         if q["tag"] == "SELECT" and q.get("options"):
-            await _pick_salary_option(page, q["id"], q["options"])
+            await _pick_salary_option(page, q["id"], q["options"],
+                                      target=claude_target or CAND_SALARY_TARGET)
         else:
             el = page.locator(f'[id="{q["id"]}"]') if q["id"] else page.locator(f'[name="{q["name"]}"]')
             if await el.count():
                 try:
                     existing = await el.first.input_value()
                     if not existing:
-                        await el.first.fill("110000")
-                        logger.info(f"    Filled '{label}' = '110000'")
+                        fill_value = str(claude_target) if claude_target else CAND_SALARY_TEXT
+                        await el.first.fill(fill_value)
+                        src = "Claude estimate" if claude_target else "config fallback"
+                        logger.info(f"    Filled '{label}' = '{fill_value}' ({src})")
                 except Exception:
                     pass
         return
     elif any(w in label for w in ["notice period", "availability", "start date"]):
-        value = "2 weeks"
+        value = CAND_NOTICE_PERIOD
     elif any(w in label for w in ["visa", "work rights", "right to work", "work authorisation",
                                    "citizenship", "residency status"]):
-        value = "485 Temporary Graduate Visa (expires July 2028)"
+        value = f"{CAND_VISA_LABEL} (expires {CAND_VISA_EXPIRY})"
     elif any(w in label for w in ["linkedin"]):
         value = ""  # Skip
 
@@ -1295,24 +1442,75 @@ async def _answer_radio_group(page: Page, group: dict, job: JobListing, candidat
         return next((i for i, o in enumerate(options_lower) if needle in o), None)
 
     if "gender" in question_label or question_label.strip() == "sex":
-        idx = _pick("male")  # picks "Male" (and avoids "Female" / "Non-binary")
+        idx = _pick(CAND_GENDER)  # picks the candidate's configured gender
         if idx is not None:
             await _check_radio(page, group["options"][idx])
             return
     if any(w in question_label for w in ["aboriginal", "torres strait", "indigenous"]):
-        idx = next((i for i, o in enumerate(options_lower) if o.strip() in ("no", "neither")), None)
+        target = "yes" if CAND_ABORIGINAL else "no"
+        idx = next((i for i, o in enumerate(options_lower) if o.strip() in (target, "neither" if target == "no" else target)), None)
         if idx is not None:
             await _check_radio(page, group["options"][idx])
             return
     if any(w in question_label for w in ["disability", "long-term health condition"]):
-        idx = next((i for i, o in enumerate(options_lower) if o.strip() == "no"), None)
+        target = "yes" if CAND_DISABILITY else "no"
+        idx = next((i for i, o in enumerate(options_lower) if o.strip() == target), None)
         if idx is not None:
             await _check_radio(page, group["options"][idx])
             return
     if any(w in question_label for w in ["veteran", "defence force", "military service"]):
-        idx = next((i for i, o in enumerate(options_lower) if o.strip() == "no"), None)
+        target = "yes" if CAND_VETERAN else "no"
+        idx = next((i for i, o in enumerate(options_lower) if o.strip() == target), None)
         if idx is not None:
             await _check_radio(page, group["options"][idx])
+            return
+
+    # 0. Location / lifestyle Yes-No rules. These mirror the same rules in
+    #    `_checkbox_hard_rule_index` so that a Yes/No question rendered as
+    #    a radio group (e.g. "Are you located in Melbourne") gets the
+    #    correct answer instead of falling through to "yes-default".
+    def _journal(source, idx):
+        _Journal.answered(
+            question=question_label, source=source,
+            answer=group["options"][idx]["label"], options=options_text,
+        )
+    cand_loc = CAND_LOCATION.lower()
+    for city in ("sydney", "melbourne", "brisbane", "perth", "adelaide",
+                 "canberra", "hobart", "darwin"):
+        if f"located in {city}" in question_label or f"based in {city}" in question_label:
+            idx = _pick("yes" if city == cand_loc else "no")
+            if idx is not None:
+                await _check_radio(page, group["options"][idx])
+                logger.info(f"    Radio (location-rule, {city}) for "
+                            f"'{question_label[:60]}': '{group['options'][idx]['label']}'")
+                _journal("location-rule", idx)
+                return
+    if any(p in question_label for p in ("willing to relocate", "open to relocating",
+                                          "relocate for the role", "willing to move")):
+        idx = _pick("yes" if CAND_RELOCATE else "no")
+        if idx is not None:
+            await _check_radio(page, group["options"][idx])
+            logger.info(f"    Radio (relocate-rule) for '{question_label[:60]}': "
+                        f"'{group['options'][idx]['label']}'")
+            _journal("relocate-rule", idx)
+            return
+    if any(p in question_label for p in ("drivers licen", "driver's licen", "valid licence")):
+        idx = _pick("yes" if CAND_DRIVERS_LICENCE else "no")
+        if idx is not None:
+            await _check_radio(page, group["options"][idx])
+            logger.info(f"    Radio (licence-rule) for '{question_label[:60]}': "
+                        f"'{group['options'][idx]['label']}'")
+            _journal("licence-rule", idx)
+            return
+    if any(p in question_label for p in ("own car", "own vehicle", "have a car",
+                                          "access to a vehicle", "access to a car",
+                                          "reliable transport")):
+        idx = _pick("yes" if CAND_OWN_CAR else "no")
+        if idx is not None:
+            await _check_radio(page, group["options"][idx])
+            logger.info(f"    Radio (vehicle-rule) for '{question_label[:60]}': "
+                        f"'{group['options'][idx]['label']}'")
+            _journal("vehicle-rule", idx)
             return
 
     # 1. Hard-rule answers for candidate facts (citizenship, work rights,
@@ -1541,6 +1739,13 @@ def _checkbox_hard_rule_index(heading: str, options_lower: list[str]) -> int | N
             "python", "automation", "infrastructure", "ci/cd", "iac",
             "kubernetes", "docker", "terraform", "technical lead",
             "team lead", "lead engineer",
+        )) or any(p in skill_words for p in (
+            # Generic "the same role as the one we're applying for" wording.
+            # If the candidate passed the match-score gate, they're a fit for
+            # the role; pick the top years bucket (config CAND_YEARS_EXPERIENCE
+            # is set to "5+").
+            "similar role", "this role", "the role", "in this position",
+            "for this position", "in a similar", "related role",
         ))
         if candidate_strong:
             # Pick the highest "X+ years" option.
@@ -1563,18 +1768,36 @@ def _checkbox_hard_rule_index(heading: str, options_lower: list[str]) -> int | N
             return best_idx
         return None
 
-    # ── Driver's licence + own car (Milan question): candidate has one.
+    # ── Driver's licence (configurable via candidate.has_drivers_licence)
     if "drivers licen" in ql or "driver's licen" in ql or "valid licence" in ql:
-        idx = _find("yes")
+        idx = _find("yes" if CAND_DRIVERS_LICENCE else "no")
         if idx is not None:
             return idx
 
-    # ── Location-in-Perth / state-specific location questions: candidate
-    #    is Sydney-based, so the truthful answer is "No".
-    if "currently located in perth" in ql or "based in perth" in ql:
-        idx = _find("no")
+    # ── Own car / access to a vehicle (configurable via candidate.has_own_car)
+    if any(p in ql for p in ("own car", "own vehicle", "have a car",
+                             "access to a vehicle", "access to a car",
+                             "reliable transport")):
+        idx = _find("yes" if CAND_OWN_CAR else "no")
         if idx is not None:
             return idx
+
+    # ── Willing to relocate (configurable via candidate.willing_to_relocate)
+    if any(p in ql for p in ("willing to relocate", "open to relocating",
+                             "relocate for the role", "willing to move")):
+        idx = _find("yes" if CAND_RELOCATE else "no")
+        if idx is not None:
+            return idx
+
+    # ── Location / state-specific questions. Answer based on the
+    #    configured CAND_LOCATION (default Sydney).
+    cand_loc = CAND_LOCATION.lower()
+    for city in ("sydney", "melbourne", "brisbane", "perth", "adelaide",
+                 "canberra", "hobart", "darwin"):
+        if f"located in {city}" in ql or f"based in {city}" in ql:
+            idx = _find("yes" if city == cand_loc else "no")
+            if idx is not None:
+                return idx
 
     # ── Work-rights / employment-rights checkbox question. The candidate
     #    holds a 485 Temporary Graduate Visa (HAS the right to work, but
@@ -1954,7 +2177,7 @@ async def _claude_answer(question: str, options: list | None, job: JobListing,
         resume_text = load_profile().strip()
         prompt = (
             f"You are answering a job application screening question on behalf of the candidate.\n"
-            f"Candidate visa status: 485 Temporary Graduate visa, expires 8 July 2028. "
+            f"Candidate visa status: {CAND_VISA_LABEL}, expires {CAND_VISA_EXPIRY}. "
             f"NOT an Australian citizen or permanent resident.\n\n"
             f"--- CANDIDATE RESUME ---\n{resume_text}\n--- END RESUME ---\n\n"
             f"Job title: {job.title}\n"
@@ -1967,7 +2190,7 @@ async def _claude_answer(question: str, options: list | None, job: JobListing,
                 "Reply with ONLY the best option text, nothing else.\n"
                 "Candidate facts:\n"
                 "- NOT an Australian citizen or permanent resident — never pick those.\n"
-                "- Holds 485 Temporary Graduate Visa (also called 'Subclass 485', "
+                f"- Holds {CAND_VISA_LABEL} (also called 'Subclass 485', "
                 "'Temporary Graduate Visa', 'Visa with no restrictions', 'Post-study Work').\n"
                 "- HAS the right to work in Australia.\n"
                 "- Does NOT have any security clearance (no NV1, NV2, baseline, AGSVA).\n"
@@ -1981,12 +2204,18 @@ async def _claude_answer(question: str, options: list | None, job: JobListing,
                 "Write naturally. Avoid AI filler (passionate, leveraging, thrilled, excited, pivotal).\n"
                 "Candidate facts:\n"
                 "- NOT an Australian citizen or permanent resident.\n"
-                "- Holds 485 Temporary Graduate Visa (expires 8 July 2028). "
+                f"- Holds {CAND_VISA_LABEL} (expires {CAND_VISA_EXPIRY}). "
                 "Aliases: 'Subclass 485', 'Temporary Graduate Visa', 'Visa with no restrictions'.\n"
                 "- HAS the right to work in Australia (answer 'Yes' to right-to-work questions).\n"
                 "- Does NOT have any security clearance (answer 'No' to NV1/NV2/baseline questions).\n"
-                "- For salary: answer 'Negotiable'.\n"
-                "- For availability / notice period: answer '2 weeks'.\n"
+                f"- For salary: estimate a fair AUD figure based on the role title, "
+                f"the company, and the seniority cues in the job description. Reply with "
+                f"a specific number (e.g. '$135,000 AUD'). Do not say '{CAND_SALARY_TEXT}'.\n"
+                f"- For availability / notice period: answer '{CAND_NOTICE_PERIOD}'.\n"
+                f"- Highest education: {CAND_EDUCATION}.\n"
+                f"- Years of core-skill (AWS/DevOps/Cloud) experience: {CAND_YEARS_EXPERIENCE} years.\n"
+                f"- Employment status: {'currently between jobs, available immediately' if CAND_EMPLOYMENT_STATUS == 'between_jobs' else CAND_EMPLOYMENT_STATUS}.\n"
+                f"- Based in {CAND_LOCATION}, Australia.\n"
                 "Reply with ONLY the answer text."
             )
         text = await claude_complete(
