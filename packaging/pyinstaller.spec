@@ -16,7 +16,12 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 PROJECT_ROOT = Path(SPECPATH).parent.resolve()
 SRC_ROOT = PROJECT_ROOT / "src"
 VENDOR_ROOT = PROJECT_ROOT / "vendor" / "job-finder"
-ENTRY_SCRIPT = SRC_ROOT / "autoapply_next" / "__main__.py"
+# Use a launcher with ABSOLUTE imports as the entry, not the package's own
+# __main__.py: PyInstaller runs the entry as top-level __main__ with no package
+# context, so __main__.py's relative imports would raise ImportError. The
+# launcher imports autoapply_next.__main__ by absolute name (see
+# packaging/autoapply_launch.py).
+ENTRY_SCRIPT = PROJECT_ROOT / "packaging" / "autoapply_launch.py"
 RESOURCES_DIR = PROJECT_ROOT / "resources"
 
 IS_MACOS = sys.platform == "darwin"
