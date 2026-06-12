@@ -22,6 +22,11 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication
 
+from .platform.bootstrap import (
+    ensure_engine_importable,
+    preflight_report,
+    seed_engine_workdir,
+)
 from .platform.paths import engine_workdir, app_log_dir
 from .safe_logging.scrubber import install_global_scrubbing
 from .safe_ui import install_global_handlers
@@ -65,6 +70,16 @@ def main() -> int:
         or engine_workdir()
     ).resolve()
     log.info("Using engine workdir: %s", workdir)
+
+    # Make the vendored engine importable in BOTH a dev checkout and a frozen
+    # build (it is not on sys.path otherwise), then seed an empty workdir so a
+    # clean-machine first run is not blocked by the adapter's missing-config
+    # guard. config.yaml is never overwritten if it already exists.
+    ensure_engine_importable()
+    for action in seed_engine_workdir(workdir):
+        log.info("workdir seed: %s", action)
+    for problem in preflight_report():
+        log.warning("preflight: %s", problem)
 
     # High-DPI is on by default in Qt 6. Explicit attributes for both OSes.
     QApplication.setApplicationName("AutoApply Next")

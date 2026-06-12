@@ -37,14 +37,39 @@ datas = []
 # vendor/job-finder -> bundled as "vendor/job-finder" inside the app payload.
 # We walk the tree manually instead of a glob so we can skip __pycache__ and
 # any local development artefacts that shouldn't ship.
-SKIP_DIRS = {"__pycache__", ".pytest_cache", ".venv", "node_modules", ".git"}
+SKIP_DIRS = {
+    "__pycache__", ".pytest_cache", ".venv", "node_modules", ".git",
+    # Runtime / secret-bearing dirs that must never ship to users.
+    "sessions", "output", ".worktrees", ".superpowers", ".claude",
+}
 SKIP_SUFFIXES = {".pyc", ".pyo"}
+
+
+def _skip_vendor_file(fname):
+    """Keep dev secrets and runtime data out of the shipped bundle.
+
+    Excludes any .env* (real creds + backups + the example template), the dev
+    config.yaml (carries the developer's candidate facts; config.yaml.example
+    is the template that ships and seeds a fresh workdir), local sqlite dbs and
+    their WAL/SHM sidecars, logs, and OS cruft. Without this the spec shipped
+    vendor/.env (LinkedIn/Seek/Gmail credential keys) to every user.
+    """
+    if Path(fname).suffix in SKIP_SUFFIXES:
+        return True
+    if fname.startswith(".env"):
+        return True
+    if fname in {".DS_Store", "config.yaml"}:
+        return True
+    if fname.endswith((".log", ".db", "-wal", "-shm")) or ".db." in fname:
+        return True
+    return False
+
 
 for dirpath, dirnames, filenames in os.walk(VENDOR_ROOT):
     # Prune skipped directories in-place so os.walk doesn't descend into them.
     dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
     for fname in filenames:
-        if Path(fname).suffix in SKIP_SUFFIXES:
+        if _skip_vendor_file(fname):
             continue
         abs_src = Path(dirpath) / fname
         # Destination is relative path inside the bundle, anchored at the
