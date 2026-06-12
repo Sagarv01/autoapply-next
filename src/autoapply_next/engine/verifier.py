@@ -131,16 +131,43 @@ def normalize_text(s: str) -> str:
     return s
 
 
+def _phrase_match(card: str, target: str, *, min_subset_tokens: int) -> bool:
+    """True if normalized `card` and `target` are the same phrase, or one's
+    tokens are a subset of the other's AND the subset side has at least
+    `min_subset_tokens` tokens.
+
+    The token floor is the hardening: it stops a short, generic phrase (a
+    single word like 'engineer') from matching a longer unrelated phrase by
+    mere containment, which is the documented cross-job false-positive vector.
+    Multi-token subset still matches so card/target truncation is tolerated.
+    """
+    if not card or not target:
+        return False
+    if card == target:
+        return True
+    ct = card.split()
+    tt = target.split()
+    short, long_ = (ct, tt) if len(ct) <= len(tt) else (tt, ct)
+    if len(short) < min_subset_tokens:
+        return False
+    return set(short).issubset(set(long_))
+
+
 def title_company_match(
     card_title: str,
     card_company: str,
     target_title: str,
     target_company: str,
 ) -> bool:
-    """Fuzzy substring match on normalized values; both axes required.
+    """Fuzzy match on normalized title AND company; both axes required.
 
-    Truncation-tolerant: if the card text is truncated, substring matches
-    either way (`card in target` OR `target in card`). Empty targets fail.
+    Title is the discriminating axis and therefore the strict one: a
+    single-token title matches only by exact equality, never by being a
+    substring of a longer card title (the cross-job false positive the
+    autonomous gate must avoid). Multi-token titles still match by token
+    subset for truncation tolerance. Company is more lenient because legal
+    suffixes ('Pty Ltd', 'Group', 'Inc') legitimately vary, so a single-token
+    subset is allowed there. Empty target axes fail closed.
     """
     ct = normalize_text(card_title)
     cc = normalize_text(card_company)
@@ -148,8 +175,8 @@ def title_company_match(
     tc = normalize_text(target_company)
     if not (tt and tc):
         return False
-    title_ok = ct in tt or tt in ct
-    company_ok = cc in tc or tc in cc
+    title_ok = _phrase_match(ct, tt, min_subset_tokens=2)
+    company_ok = _phrase_match(cc, tc, min_subset_tokens=1)
     return title_ok and company_ok
 
 
