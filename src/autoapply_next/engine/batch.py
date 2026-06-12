@@ -76,6 +76,50 @@ from .results import ApplicationResult, ApplicationStatus
 logger = logging.getLogger(__name__)
 
 
+# --------------------------------------------------------------------------- pacing
+
+# Inter-apply pacing floor, mirroring vendor/job-finder/main.py
+# APPLY_GAP_MIN / APPLY_GAP_MAX. These are the anti-bot baseline the live
+# engine uses between real submits.
+APPLY_GAP_MIN = 60
+APPLY_GAP_MAX = 120
+
+
+def live_safe_throttle_range(
+    throttle_range_seconds: tuple[int, int],
+    *,
+    allow_real_submit: bool,
+) -> tuple[int, int]:
+    """Clamp the inter-apply pacing range so a LIVE submit can never fire
+    below the anti-bot floor, no matter what the caller passes or what the
+    "Pace between applies" toggle is set to.
+
+    This is the single safety contract behind autonomous live submission
+    (test plan layer 4). `run_batch` applies it at the one point every live
+    apply funnels through, so no execution path, including chained Phase 0 /
+    Phase 2 runs, can bypass it.
+
+    - `allow_real_submit=True`: lower bound is floored to `APPLY_GAP_MIN`
+      (60s). A caller range already above the floor is honored. A collapsed
+      range (e.g. the (0, 0) the OFF toggle produces) expands to the full
+      `(APPLY_GAP_MIN, APPLY_GAP_MAX)` band so pacing stays randomized.
+    - `allow_real_submit=False`: returned unchanged. Dry-run files no
+      application, so it may opt out of pacing entirely, including (0, 0).
+
+    Idempotent: clamping an already-floored range is a no-op.
+    """
+    lo_raw, hi_raw = int(throttle_range_seconds[0]), int(throttle_range_seconds[1])
+    if not allow_real_submit:
+        return (lo_raw, hi_raw)
+    lo = max(lo_raw, APPLY_GAP_MIN)
+    hi = max(hi_raw, lo)
+    if hi <= lo:
+        # Range collapsed at/under the floor (the OFF-toggle case): restore a
+        # randomization band rather than a fixed gap.
+        hi = max(APPLY_GAP_MAX, lo)
+    return (lo, hi)
+
+
 # ----------------------------------------------------------------------------- types
 
 
@@ -427,6 +471,15 @@ async def run_batch(
     total = len(job_urls)
     consecutive_failures = 0
 
+    # Authoritative pacing floor. Every live apply funnels through this
+    # function, so flooring here means no caller (single batch, chained
+    # Phase 0 / Phase 2, a future loop) can fire a real submit below the
+    # anti-bot baseline, regardless of the throttle range handed in. Dry-run
+    # may still opt out (test plan layer 4 / live_safe_throttle_range).
+    effective_throttle = live_safe_throttle_range(
+        throttle_range_seconds, allow_real_submit=allow_real_submit
+    )
+
     try:
         for i, url in enumerate(job_urls, start=1):
             # Graceful stop: check BEFORE starting the next job.
@@ -576,7 +629,7 @@ async def run_batch(
             # Throttle between jobs. Last iteration: no need.
             if i < total:
                 gap = random.uniform(
-                    throttle_range_seconds[0], throttle_range_seconds[1]
+                    effective_throttle[0], effective_throttle[1]
                 )
                 await _async_throttle(gap, is_stopped, is_cancelled)
 

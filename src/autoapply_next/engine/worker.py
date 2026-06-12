@@ -53,6 +53,7 @@ from .adapter import EngineNotReadyError, apply_to_job
 from .batch import (
     BatchPreparedJob,
     BatchRunResult,
+    live_safe_throttle_range,
     prepare_batch,
     run_batch,
 )
@@ -471,16 +472,20 @@ class EngineWorker(QObject):
         # default worker setting of 20, this becomes (60, 120) which is the
         # spirit of the engine pacing.
         #
-        # `throttle_seconds <= 0` is the explicit opt-out from the Settings
-        # checkbox "Pace between applies". Pass (0, 0) all the way through
-        # to run_batch (which calls random.uniform(0, 0) = 0 and asyncio
-        # sleeps for it) so applies run back-to-back. This bypasses
-        # job-finder's anti-bot pacing -- the user owns the risk.
-        if int(throttle_seconds) <= 0:
-            throttle_range = (0, 0)
-        else:
-            lower = max(60, int(throttle_seconds))
-            throttle_range = (lower, lower + 60)
+        # `throttle_seconds <= 0` is the "Pace between applies" OFF opt-out.
+        # It may only reduce pacing on a DRY-RUN; on a live submit the floor
+        # is unconditional (live_safe_throttle_range clamps the OFF (0, 0) up
+        # to the (60, 120) anti-bot baseline). run_batch re-applies the same
+        # clamp as the authoritative guard; doing it here too keeps the range
+        # we log honest.
+        raw_range = (
+            (0, 0)
+            if int(throttle_seconds) <= 0
+            else (max(60, int(throttle_seconds)), max(60, int(throttle_seconds)) + 60)
+        )
+        throttle_range = live_safe_throttle_range(
+            raw_range, allow_real_submit=allow_real_submit
+        )
         try:
             try:
                 def on_progress(done, total, result):
@@ -559,12 +564,21 @@ class EngineWorker(QObject):
                 )
                 phase0_urls = phase0_urls[:max_jobs]
                 mode = "LIVE" if allow_real_submit else "dry-run"
-                # See `_batch_run_runner` for the (0, 0) opt-out contract.
-                if int(throttle_seconds) <= 0:
-                    throttle_range = (0, 0)
-                else:
-                    lower = max(60, int(throttle_seconds))
-                    throttle_range = (lower, lower + 60)
+                # See `_batch_run_runner` for the OFF opt-out contract. The
+                # OFF (0, 0) is clamped to the (60, 120) floor on a live
+                # submit and only honored on a dry-run. Both Phase 0 and
+                # Phase 2 reuse this `throttle_range`.
+                raw_range = (
+                    (0, 0)
+                    if int(throttle_seconds) <= 0
+                    else (
+                        max(60, int(throttle_seconds)),
+                        max(60, int(throttle_seconds)) + 60,
+                    )
+                )
+                throttle_range = live_safe_throttle_range(
+                    raw_range, allow_real_submit=allow_real_submit
+                )
 
                 def on_progress(done, total, result):
                     self.batch_apply_progress.emit(done, total, result)
