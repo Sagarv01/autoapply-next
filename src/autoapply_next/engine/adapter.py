@@ -69,6 +69,7 @@ from .persistence import (
     is_fatal_condition,
     persist_apply_outcome,
     persist_in_progress,
+    same_role_already_applied,
 )
 from .progress import ProgressEvent, ProgressStage
 from .results import ApplicationResult, ApplicationStatus
@@ -102,6 +103,13 @@ class JobNotQuickApplyError(RuntimeError):
     """The job either is not a Seek listing or does not offer quick-apply.
     The minimal product (ADR-0001) refuses these; non-Seek paths require an
     Anthropic API key and a different gate."""
+
+
+class SameRoleDuplicateError(RuntimeError):
+    """A sibling listing of the same employer+title role has already been
+    applied to (or is in flight). URL dedup misses reposts under new listing
+    ids; this guard stops a duplicate application going out under the user's
+    name. Maps to 'skipped' in jobs.db (persistence.map_status)."""
 
 
 def _no_progress(ev: ProgressEvent) -> None:
@@ -505,6 +513,33 @@ async def apply_to_job(
                     # so persistence maps it to 'skipped' via map_status.
                     err = JobNotQuickApplyError(
                         f"Job is not a Seek quick-apply listing: {job_url}"
+                    )
+                    return _failure(
+                        job_url, "peek", err, progress,
+                        engine_workdir=engine_workdir,
+                    )
+
+                # ---------- SAME-ROLE DEDUP GUARD ----------
+                # URL dedup keys on the listing id, so it misses the same
+                # employer+title role reposted under a new id (reposts,
+                # multi-location, agency double-posts). Recon found 133 such
+                # duplicate live submissions already in the production db (one
+                # role applied to 6 times in 19 minutes). Check here, after we
+                # know the role's company+title but BEFORE spending a
+                # score/tailor/submit on it. Mirrors the JobNotQuickApply skip
+                # path: SameRoleDuplicateError -> _failure -> FAILED ->
+                # map_status -> 'skipped' (never re-enters eligibility).
+                sibling_url = same_role_already_applied(
+                    engine_workdir=engine_workdir,
+                    company=getattr(job, "company", "") or "",
+                    title=getattr(job, "title", "") or "",
+                    exclude_url=job_url,
+                )
+                if sibling_url:
+                    await _close_open_page_safely(open_page)
+                    err = SameRoleDuplicateError(
+                        f"Same role already applied at {sibling_url}; "
+                        f"skipping duplicate listing {job_url}"
                     )
                     return _failure(
                         job_url, "peek", err, progress,

@@ -101,6 +101,16 @@ MANUALLY_REQUEUEABLE: frozenset[str] = frozenset({"failed"})
 PERMAFAIL_THRESHOLD: int = 3
 
 
+# Statuses that mean an application for this ROLE has already gone out (or is
+# mid-flight), so a sibling listing of the same employer+title must not be
+# applied to again. Deliberately excludes 'failed'/'skipped'/'queued': those
+# did NOT submit an application for the role (a sibling that was skipped for
+# low score / external-ATS, or failed, should still be attempted once).
+SAME_ROLE_BLOCK_STATUSES: frozenset[str] = frozenset(
+    {"applied", "submitted_uncertain", "in_progress"}
+)
+
+
 _SEEK_JOB_RE = re.compile(r"^https?://[^/]+/job/(\d+)", re.IGNORECASE)
 
 
@@ -170,6 +180,11 @@ def map_status(result: ApplicationResult) -> str | None:
         msg = (result.error_message or "").lower()
         # Peek-stage JobNotQuickApplyError is a structural skip.
         if exc == "JobNotQuickApplyError":
+            return "skipped"
+        # Same-role duplicate: a sibling listing of this employer+title was
+        # already applied to. We deliberately did not submit again; record it
+        # as 'skipped' (not 'failed') so it never re-enters eligibility.
+        if exc == "SameRoleDuplicateError":
             return "skipped"
         # ExternalApplyError: engine reached the apply page and detected
         # it is NOT a Quick Apply form (redirect to external recruiter
@@ -464,6 +479,70 @@ def queued_urls_for_batch(
             (int(min_score), int(PERMAFAIL_THRESHOLD)),
         )
         return [r[0] for r in cur.fetchall()]
+
+
+def role_key(company: str, title: str) -> str:
+    """Normalized same-role key: lowercased, whitespace-collapsed
+    `company` + `title`. Returns "" when either part is blank, which the
+    caller treats as "cannot dedup by role" (never blocks).
+
+    Two Seek listings with the same employer and title map to the same key
+    even when their listing ids (and therefore urls) differ, which is what
+    URL dedup misses on reposts and multi-location duplicates.
+    """
+    c = " ".join((company or "").lower().split())
+    t = " ".join((title or "").lower().split())
+    if not c or not t:
+        return ""
+    return f"{c}\x1f{t}"
+
+
+def same_role_already_applied(
+    *,
+    engine_workdir: Path,
+    company: str,
+    title: str,
+    exclude_url: str | None = None,
+) -> str | None:
+    """Return the url of an existing application for the SAME role (same
+    normalized employer+title) that has already gone out or is in flight,
+    or None if there is no such sibling.
+
+    Considers only `SAME_ROLE_BLOCK_STATUSES` (applied / submitted_uncertain
+    / in_progress). The current listing is excluded via `exclude_url`
+    (canonicalized) so a job never blocks itself. Returns None when the
+    role key is empty (missing company or title) so a thin-metadata listing
+    is never silently skipped.
+
+    The role key is recomputed per candidate row in Python rather than in
+    SQL so normalization is identical to `role_key` and robust to stray
+    whitespace/case in historical rows.
+    """
+    key = role_key(company, title)
+    if not key:
+        return None
+    db_path = Path(engine_workdir) / "jobs.db"
+    if not db_path.exists():
+        return None
+    exclude = canonical_seek_url(exclude_url) if exclude_url else None
+    placeholders = ",".join("?" for _ in SAME_ROLE_BLOCK_STATUSES)
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                "SELECT url, company, title FROM applications "
+                f"WHERE status IN ({placeholders}) "
+                "AND COALESCE(company, '') != '' "
+                "AND COALESCE(title, '') != ''",
+                tuple(SAME_ROLE_BLOCK_STATUSES),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    for url, row_company, row_title in rows:
+        if exclude and canonical_seek_url(url) == exclude:
+            continue
+        if role_key(row_company, row_title) == key:
+            return url
+    return None
 
 
 def permafailed_urls(engine_workdir: Path) -> set[str]:

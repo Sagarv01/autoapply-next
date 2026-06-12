@@ -375,6 +375,9 @@ _SKIPPABLE_FAILURE_EXCEPTION_TYPES = frozenset({
     "ExternalApplyError",
     "CoverLetterQualityError",
     "PermissionError",
+    # Same-role duplicate: a deliberate skip, not an engine fault. A run of
+    # reposts of roles we already applied to must not trip the breaker.
+    "SameRoleDuplicateError",
 })
 
 

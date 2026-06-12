@@ -755,3 +755,97 @@ def test_peek_page_is_closed_when_score_below_threshold(
         "Peek page was leaked on the score-below-threshold path; "
         "_close_open_page_safely was not called."
     )
+
+
+def test_same_role_duplicate_skips_before_score_and_apply(
+    engine_modules, monkeypatch
+):
+    """A queued listing whose employer+title role was already applied to
+    under a different url must be short-circuited to a 'skipped' duplicate
+    BEFORE any score / tailor / submit. This is the fix for the same-role
+    duplicate harm (133 real duplicates found in the production db)."""
+    from autoapply_next.engine.adapter import apply_to_job
+    from autoapply_next.engine.persistence import map_status
+    from autoapply_next.engine.results import ApplicationStatus
+
+    workdir, counters = engine_modules
+
+    current = "https://au.seek.com/job/2"
+    sibling = "https://au.seek.com/job/1"
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        # Sibling listing of the SAME role, already applied to.
+        conn.execute(
+            "INSERT INTO applications "
+            "(url, title, company, board, match_score, status, timestamp, "
+            " failure_count) VALUES (?,?,?,?,?,?,?,0)",
+            (sibling, "Automation Architect", "Datacom", "seek", 80, "applied", "t"),
+        )
+        # The current listing the adapter will peek; title/company come from
+        # this row via _title_company_from_db.
+        conn.execute(
+            "INSERT INTO applications "
+            "(url, title, company, board, match_score, status, timestamp, "
+            " failure_count) VALUES (?,?,?,?,?,?,?,0)",
+            (current, "Automation Architect", "Datacom", "seek", 80, "queued", "t"),
+        )
+        conn.commit()
+
+    result = asyncio.run(
+        apply_to_job(
+            job_url=current,
+            engine_workdir=workdir,
+            allow_real_submit=True,
+            match_threshold=0,
+        )
+    )
+
+    assert result.status == ApplicationStatus.FAILED
+    assert result.exception_type == "SameRoleDuplicateError"
+    assert sibling in (result.error_message or ""), (
+        "the skip note should name the sibling url for auditability"
+    )
+    # The guard fires before scoring, tailoring, and submitting.
+    assert counters.score_calls == 0, "scored a known same-role duplicate"
+    assert counters.tailor_calls == 0, "tailored a known same-role duplicate"
+    assert counters.apply_calls == 0, "SUBMITTED a same-role duplicate"
+    # And it persists as 'skipped', so it never re-enters batch eligibility.
+    assert map_status(result) == "skipped"
+
+
+def test_distinct_role_is_not_treated_as_duplicate(engine_modules, monkeypatch):
+    """A different role at the same company (or same title at a different
+    company) must NOT be skipped: the guard keys on employer+title together."""
+    from autoapply_next.engine.adapter import apply_to_job
+
+    workdir, counters = engine_modules
+
+    current = "https://au.seek.com/job/4"
+    other = "https://au.seek.com/job/3"
+    with sqlite3.connect(workdir / "jobs.db") as conn:
+        conn.execute(
+            "INSERT INTO applications "
+            "(url, title, company, board, match_score, status, timestamp, "
+            " failure_count) VALUES (?,?,?,?,?,?,?,0)",
+            (other, "Platform Engineer", "Datacom", "seek", 80, "applied", "t"),
+        )
+        conn.execute(
+            "INSERT INTO applications "
+            "(url, title, company, board, match_score, status, timestamp, "
+            " failure_count) VALUES (?,?,?,?,?,?,?,0)",
+            (current, "Automation Architect", "Datacom", "seek", 80, "queued", "t"),
+        )
+        conn.commit()
+
+    result = asyncio.run(
+        apply_to_job(
+            job_url=current,
+            engine_workdir=workdir,
+            allow_real_submit=True,
+            match_threshold=0,
+        )
+    )
+
+    # A distinct role proceeds through the pipeline and submits.
+    assert result.exception_type != "SameRoleDuplicateError"
+    assert counters.score_calls == 1
+    assert counters.apply_calls == 1
