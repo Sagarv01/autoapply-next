@@ -189,12 +189,29 @@ decision); on a clean Mac the tester right-click-Opens once past Gatekeeper.
 
 ## Known limitations
 
-- **Deeper verifier hardening is staged, not shipped.** The job-id verification
-  strategy still scans the whole Applied Jobs page rather than the specific
-  applied-card subtree, so in principle a job id appearing in a "recommended"
-  rail could read as applied. Scoping that safely needs live Seek DOM, so it is
-  deferred to the live-pilot phase rather than changed blind against the working
-  verifier.
+- **Deeper verifier hardening — RESOLVED 2026-06-15** (commit 292136d). The
+  job-id strategy scanned the whole Applied Jobs page, so an id in a
+  "recommended" rail could read as applied. Rather than scope the DOM scan
+  (which needs live Seek DOM for a container selector), the fix demotes a bare
+  job-id match to a WEAK signal: it never declares APPLIED alone; confident
+  APPLIED requires the card-scoped title+company match. An uncorroborated id ->
+  UNCERTAIN -> SUBMITTED_UNCERTAIN (manual review + dedup-blocked). This works
+  because Seek's applied cards carry no /job link (seek_apply._scrape_applied_cards),
+  so a bare id was never a true-positive signal anyway. No live submit used.
+- **Engine hardening round 2 — 2026-06-15** (commits 292136d, d6e00bf, 6554581,
+  bc5ab78; no real submit anywhere, `allow_real_submit` stayed False):
+  - Throttle floor: read-only confirmed correct on every path incl. chained.
+    SURFACED: the daily cap is effectively PER-RUN (`today_count_fn` not wired,
+    `batch.py`/`worker.py`); operator to set a true daily-cap value + wire it.
+    `settings_screen.py:174` "not yet enforced" copy is stale (it IS enforced
+    per-run).
+  - Verifier company axis: now strips a corporate-filler stop-list
+    (`_COMPANY_FILLER_TOKENS`) then requires >=1 meaningful token. Cuts the
+    filler-collision false-positive AND the cross-suffix false-negative.
+  - Same-role dedup: added the within-run invariant test; guarded the
+    empty-metadata bypass (`dedup_before_apply` -> Seek job-id listing fallback,
+    else `UndedupableListingError` -> 'skipped'/re-queue-to-confirm). It never
+    silently never-blocks now.
 - **Packaged build not yet built/run here.** The code is frozen-build-correct,
   but `pyinstaller` is not installed in the venv and no `.app` has been produced
   or launched on a clean profile yet. Steps below.
