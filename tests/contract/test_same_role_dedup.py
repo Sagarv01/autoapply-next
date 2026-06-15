@@ -19,6 +19,7 @@ import pytest
 
 from autoapply_next.engine.persistence import (
     map_status,
+    persist_in_progress,
     role_key,
     same_role_already_applied,
 )
@@ -110,6 +111,51 @@ def test_submitted_uncertain_and_in_progress_siblings_also_block(workdir: Path) 
     assert same_role_already_applied(
         engine_workdir=workdir, company="Acme", title="Platform Engineer", exclude_url="x"
     ) == "https://au.seek.com/job/2"
+
+
+def test_same_role_blocked_within_run_when_sibling_enters_apply(workdir: Path) -> None:
+    """Within ONE run: the moment job #1 enters the apply, the engine writes
+    status='in_progress' (persist_in_progress) BEFORE the submit. A same-role
+    job #2 processed later in the same (sequential) run then finds that
+    in_progress sibling and is blocked -- so no same-role duplicate can be
+    submitted in a single run. Uses the real pre-submit write; no real submit.
+
+    This is the within-run invariant the chained/batch runner relies on:
+    run_batch is sequential, so job #1 reaches in_progress before job #2's
+    dedup check runs.
+    """
+    url1 = "https://au.seek.com/job/1"
+    url2 = "https://au.seek.com/job/2"
+    title, company = "Senior Automation Architect", "Datacom"
+    _seed(
+        workdir,
+        [
+            (url1, title, company, "queued"),
+            (url2, title, company, "queued"),
+        ],
+    )
+
+    # Both still 'queued' -> job #2 is NOT yet blocked (queued is not a block status).
+    assert (
+        same_role_already_applied(
+            engine_workdir=workdir, company=company, title=title, exclude_url=url2
+        )
+        is None
+    )
+
+    # Job #1 enters the apply: the engine writes in_progress before submitting.
+    res = persist_in_progress(
+        engine_workdir=workdir, url=url1, title=title, company=company
+    )
+    assert res.written
+
+    # Now job #2 (same role, later in the same run) is blocked by job #1.
+    assert (
+        same_role_already_applied(
+            engine_workdir=workdir, company=company, title=title, exclude_url=url2
+        )
+        == url1
+    )
 
 
 def test_failed_skipped_queued_siblings_do_not_block(workdir: Path) -> None:
