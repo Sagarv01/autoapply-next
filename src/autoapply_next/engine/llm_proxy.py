@@ -13,6 +13,7 @@ can branch on the same types.
 """
 from __future__ import annotations
 
+import inspect
 import os
 from typing import Any, Callable
 
@@ -50,7 +51,11 @@ class QuotaExceededError(ProxyError):
 
 
 class ProxyUnavailableError(ProxyError):
-    """HTTP 502/503/504 or a network/transport error."""
+    """HTTP 502/503/504 or a network/transport error. Transient, retryable."""
+
+
+class KillSwitchError(ProxyError):
+    """Submissions are globally disabled by the proxy kill switch (/api/config)."""
 
 
 # ── configuration ───────────────────────────────────────────────────────────
@@ -92,10 +97,55 @@ def _get_access_token() -> str | None:
         return None
 
 
+# Token refresher. Phase 3 auth wires this to silently exchange the refresh
+# token for a fresh access token. Used for the 401 refresh-and-retry-once
+# policy (TASKS 2.2). May be sync or async.
+_token_refresher: Callable[[], Any] | None = None
+
+
+def set_token_refresher(refresher: Callable[[], Any] | None) -> None:
+    global _token_refresher
+    _token_refresher = refresher
+
+
+async def refresh_access_token() -> bool:
+    """Invoke the configured refresher once. Returns True if a refresher ran
+    (so the caller may retry), False if none is configured."""
+    if _token_refresher is None:
+        return False
+    result = _token_refresher()
+    if inspect.isawaitable(result):
+        await result
+    return True
+
+
 # ── transport (factored so unit tests can stub it) ──────────────────────────
 async def _http_post(url: str, headers: dict, payload: dict, timeout: float) -> httpx.Response:
     async with httpx.AsyncClient(timeout=timeout) as client:
         return await client.post(url, headers=headers, json=payload)
+
+
+async def _http_get(url: str, timeout: float) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        return await client.get(url)
+
+
+async def submissions_enabled(timeout: float = 10.0) -> bool:
+    """Poll the proxy's public /api/config global kill switch (TASKS 2.2).
+
+    Fail-open (returns True) if the config cannot be fetched: a real outage is
+    caught by the preflight PROXY_UNREACHABLE check (Phase 5), and we do not
+    want a transient config blip to silently freeze a signed-in user.
+    """
+    url = f"{_proxy_base_url()}/api/config"
+    try:
+        resp = await _http_get(url, timeout)
+        if resp.status_code >= 400:
+            return True
+        data = resp.json() or {}
+    except Exception:
+        return True
+    return bool(data.get("submissions_enabled", True))
 
 
 def _safe_json(resp: httpx.Response) -> Any:

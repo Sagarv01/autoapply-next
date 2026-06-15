@@ -29,8 +29,20 @@ async def _proxy_claude_complete(
     *, system: str, user: str, model: str | None = None, timeout: float = 180.0
 ) -> str:
     """Drop-in replacement for `claude_cli.claude_complete` that routes through
-    the proxy. Signature-compatible with every engine call site."""
-    return await llm_proxy.proxy_complete(system=system, user=user, model=model, timeout=timeout)
+    the proxy. Signature-compatible with every engine call site.
+
+    Implements the 401 refresh-and-retry-once policy (TASKS 2.2): on an expired
+    session, refresh the access token once and retry exactly one more time. A
+    persistent 401 (or no refresher configured) propagates as AuthExpiredError,
+    which is fatal-for-batch (see persistence.is_fatal_condition).
+    """
+    try:
+        return await llm_proxy.proxy_complete(system=system, user=user, model=model, timeout=timeout)
+    except llm_proxy.AuthExpiredError:
+        refreshed = await llm_proxy.refresh_access_token()
+        if not refreshed:
+            raise
+        return await llm_proxy.proxy_complete(system=system, user=user, model=model, timeout=timeout)
 
 
 class ProxyLLM(AbstractContextManager):

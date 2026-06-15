@@ -247,6 +247,21 @@ def is_fatal_condition(
             )
         if "rate limit" in msg or "blocked" in msg:
             return "Seek temporarily blocking us; pause"
+    # Proxy / LLM-broker failures (TASKS 2.2), matched by exception-type name to
+    # avoid importing the engine package here. A fatal one halts the batch and
+    # surfaces in the UI; the user must act. Transient ProxyUnavailableError is
+    # deliberately NOT fatal so the generic retry + consecutive-failure breaker
+    # absorb a brief outage.
+    if exc == "AuthExpiredError":
+        return "Sign-in expired; sign in again to continue"
+    if exc == "SubscriptionExpiredError":
+        return "Subscription inactive; renew to continue applying"
+    if exc == "ClientTooOldError":
+        return "App update required before applications can continue"
+    if exc == "QuotaExceededError":
+        return "Usage limit reached; applications paused"
+    if exc == "KillSwitchError":
+        return "Submissions paused by AutoApply (maintenance)"
     return None
 
 
