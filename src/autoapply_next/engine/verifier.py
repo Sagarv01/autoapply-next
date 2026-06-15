@@ -153,6 +153,44 @@ def _phrase_match(card: str, target: str, *, min_subset_tokens: int) -> bool:
     return set(short).issubset(set(long_))
 
 
+# Corporate filler tokens stripped from the COMPANY axis before matching. They
+# carry no identifying signal (every "X Pty Ltd"/"X Group"/"X Solutions" shares
+# them), so leaving them in caused two errors: a false-positive (a bare "Group"
+# subset-matching any "<employer> Group") and a false-negative (the same
+# employer under different suffixes, "Datacom Group" vs "Datacom Pty Ltd", not
+# matching). Stripping them and requiring >=1 MEANINGFUL token in common fixes
+# both. Ambiguous candidates deliberately NOT included (operator decision):
+# tech, global, international, holdings, partners, digital.
+_COMPANY_FILLER_TOKENS: frozenset[str] = frozenset({
+    # operator-specified
+    "pty", "ltd", "limited", "group", "solutions", "technologies",
+    "services", "recruitment", "consulting", "australia",
+    # unambiguous members of the same family ("and similar")
+    "solution", "technology", "service", "consultancy", "consultants",
+    "inc", "incorporated", "corp", "corporation", "co", "company",
+    "llc", "plc", "au",
+    # generic connectors, never an identifying token
+    "the", "and", "of",
+})
+
+
+def _meaningful_company_tokens(company: str) -> set[str]:
+    return {
+        t for t in normalize_text(company).split() if t not in _COMPANY_FILLER_TOKENS
+    }
+
+
+def _company_match(card_company: str, target_company: str) -> bool:
+    """Match companies on MEANINGFUL (non-filler) tokens: strip corporate
+    filler, then require at least one meaningful token in common. Fails closed
+    when the target has no meaningful token (e.g. an all-filler "Group")."""
+    ct = _meaningful_company_tokens(card_company)
+    tt = _meaningful_company_tokens(target_company)
+    if not tt:
+        return False
+    return bool(ct & tt)
+
+
 def title_company_match(
     card_title: str,
     card_company: str,
@@ -165,18 +203,17 @@ def title_company_match(
     single-token title matches only by exact equality, never by being a
     substring of a longer card title (the cross-job false positive the
     autonomous gate must avoid). Multi-token titles still match by token
-    subset for truncation tolerance. Company is more lenient because legal
-    suffixes ('Pty Ltd', 'Group', 'Inc') legitimately vary, so a single-token
-    subset is allowed there. Empty target axes fail closed.
+    subset for truncation tolerance. Company strips corporate filler tokens
+    (`_COMPANY_FILLER_TOKENS`) and then requires >=1 meaningful token in common,
+    which tolerates legal-suffix variation without letting a bare filler token
+    ('Group') collide. Empty target axes fail closed.
     """
     ct = normalize_text(card_title)
-    cc = normalize_text(card_company)
     tt = normalize_text(target_title)
-    tc = normalize_text(target_company)
-    if not (tt and tc):
+    if not (tt and normalize_text(target_company)):
         return False
     title_ok = _phrase_match(ct, tt, min_subset_tokens=2)
-    company_ok = _phrase_match(cc, tc, min_subset_tokens=1)
+    company_ok = _company_match(card_company, target_company)
     return title_ok and company_ok
 
 

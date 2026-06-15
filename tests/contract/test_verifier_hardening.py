@@ -65,3 +65,35 @@ def test_allows_card_truncated_into_target() -> None:
         "Senior DevOps...", "Acme",
         "Senior DevOps Cloud Architect", "Acme",
     )
+
+
+# ---------------------- company stop-list (filler tokens) hardening
+
+
+def test_rejects_filler_only_company_collision() -> None:
+    # A bare filler company ("Group") must NOT subset-match a real "<X> Group"
+    # card and flip a failed submit to APPLIED. (Before the stop-list this
+    # matched: 'group' was a 1-token subset of 'datacom group'.)
+    assert not title_company_match(
+        "Data Engineer", "Datacom Group",  # an unrelated applied card
+        "Data Engineer", "Group",          # our (failed) target: filler-only company
+    )
+
+
+def test_matches_same_employer_across_different_suffixes() -> None:
+    # The SAME employer under different legal suffixes must still match on the
+    # meaningful token ('datacom'). (Before the stop-list this FAILED: 'datacom
+    # group' tokens were not a subset of 'datacom pty ltd'.)
+    assert title_company_match(
+        "Data Engineer", "Datacom Pty Ltd",
+        "Data Engineer", "Datacom Group",
+    )
+
+
+def test_filler_token_in_both_does_not_alone_match() -> None:
+    # Two genuinely different employers that share only a filler token must NOT
+    # match on that filler alone.
+    assert not title_company_match(
+        "Data Engineer", "Acme Technologies",
+        "Data Engineer", "Globex Technologies",
+    )
