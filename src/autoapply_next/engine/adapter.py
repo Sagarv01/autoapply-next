@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .hooks import EngineHooks
+from .llm_adapter import ProxyLLM
 from .persistence import (
     PersistResult,
     is_fatal_condition,
@@ -460,7 +461,8 @@ async def apply_to_job(
         import matcher  # type: ignore[import-not-found]
         import tailorer  # type: ignore[import-not-found]
 
-        with EngineHooks(journal_path=journal_path) as hooks, \
+        with ProxyLLM(), \
+                EngineHooks(journal_path=journal_path) as hooks, \
                 SafetyGate(
                     allow_real_submit=allow_real_submit,
                     screenshot_dir=screenshot_dir,
@@ -937,7 +939,8 @@ async def score_job_only(
                 raise JobNotQuickApplyError(
                     f"Not a quick-apply listing: {job_url}"
                 )
-            score, reasoning = await matcher.score_job(job)
+            with ProxyLLM():
+                score, reasoning = await matcher.score_job(job)
             return score, reasoning, {
                 "title": job.title,
                 "company": job.company,
@@ -963,7 +966,7 @@ async def tailor_only(
             journal_path = (
                 Path(engine_workdir).resolve() / "errors" / "applications.jsonl"
             )
-            with EngineHooks(journal_path=journal_path) as hooks:
+            with EngineHooks(journal_path=journal_path) as hooks, ProxyLLM():
                 resume_pdf, cover_pdf = await tailorer.tailor(job, tier="full")
                 return (
                     Path(resume_pdf),
