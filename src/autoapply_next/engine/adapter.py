@@ -67,10 +67,10 @@ from .hooks import EngineHooks
 from .llm_adapter import ProxyLLM
 from .persistence import (
     PersistResult,
+    dedup_before_apply,
     is_fatal_condition,
     persist_apply_outcome,
     persist_in_progress,
-    same_role_already_applied,
 )
 from .progress import ProgressEvent, ProgressStage
 from .results import ApplicationResult, ApplicationStatus
@@ -111,6 +111,14 @@ class SameRoleDuplicateError(RuntimeError):
     applied to (or is in flight). URL dedup misses reposts under new listing
     ids; this guard stops a duplicate application going out under the user's
     name. Maps to 'skipped' in jobs.db (persistence.map_status)."""
+
+
+class UndedupableListingError(RuntimeError):
+    """A listing we could not dedup: no role metadata (company+title) AND no
+    extractable Seek job id, so neither same-role nor listing dedup could run.
+    We refuse to apply blind. Maps to 'skipped' (persistence.map_status) so the
+    user must explicitly re-queue to confirm; the listing is never silently
+    applied."""
 
 
 def _no_progress(ev: ProgressEvent) -> None:
@@ -531,17 +539,31 @@ async def apply_to_job(
                 # score/tailor/submit on it. Mirrors the JobNotQuickApply skip
                 # path: SameRoleDuplicateError -> _failure -> FAILED ->
                 # map_status -> 'skipped' (never re-enters eligibility).
-                sibling_url = same_role_already_applied(
+                dedup = dedup_before_apply(
                     engine_workdir=engine_workdir,
+                    url=job_url,
                     company=getattr(job, "company", "") or "",
                     title=getattr(job, "title", "") or "",
-                    exclude_url=job_url,
                 )
-                if sibling_url:
+                if dedup.sibling_url:
                     await _close_open_page_safely(open_page)
+                    scope = "role" if dedup.kind == "role" else "listing"
                     err = SameRoleDuplicateError(
-                        f"Same role already applied at {sibling_url}; "
+                        f"Same {scope} already applied at {dedup.sibling_url}; "
                         f"skipping duplicate listing {job_url}"
+                    )
+                    return _failure(
+                        job_url, "peek", err, progress,
+                        engine_workdir=engine_workdir,
+                    )
+                if dedup.requires_confirmation:
+                    # No role metadata AND no Seek job id: the listing cannot be
+                    # deduped. Never silently proceed -- skip + flag so the user
+                    # explicitly re-queues to confirm before it can apply.
+                    await _close_open_page_safely(open_page)
+                    err = UndedupableListingError(
+                        f"Cannot dedup {job_url}: no company/title metadata and "
+                        "no Seek job id. Skipping; re-queue to confirm before applying."
                     )
                     return _failure(
                         job_url, "peek", err, progress,

@@ -186,6 +186,12 @@ def map_status(result: ApplicationResult) -> str | None:
         # as 'skipped' (not 'failed') so it never re-enters eligibility.
         if exc == "SameRoleDuplicateError":
             return "skipped"
+        # Undedupable listing: no role metadata AND no extractable Seek job id,
+        # so we could not dedup this listing and refused to apply blind. Record
+        # as 'skipped' (terminal, never auto-retried) so it is not silently
+        # re-applied; the user must explicitly re-queue to confirm.
+        if exc == "UndedupableListingError":
+            return "skipped"
         # ExternalApplyError: engine reached the apply page and detected
         # it is NOT a Quick Apply form (redirect to external recruiter
         # ATS, or the form changed after the listing check). Same
@@ -558,6 +564,83 @@ def same_role_already_applied(
         if role_key(row_company, row_title) == key:
             return url
     return None
+
+
+def _seek_job_id(url: str) -> str | None:
+    """The Seek listing id from an apply URL, e.g. '12345' from
+    'https://au.seek.com/job/12345/apply'. None if the URL is not a Seek job
+    URL. Mirrors `canonical_seek_url`'s regex (`_SEEK_JOB_RE`). NOTE: if Seek
+    ever changes its URL shape this is the one regex to revisit."""
+    m = _SEEK_JOB_RE.search(url or "")
+    return m.group(1) if m else None
+
+
+def same_listing_already_applied(*, engine_workdir: Path, url: str) -> str | None:
+    """Listing-level dedup by Seek job id -- the fallback when role metadata
+    (company+title) is missing so `role_key` cannot be computed. Returns the url
+    of an existing row for the SAME listing (same job id) in a
+    `SAME_ROLE_BLOCK_STATUSES` state, or None.
+
+    Job ids are unique per listing, so a block-status row carrying this id means
+    this exact listing already went out or is in flight -- a re-apply to block.
+    No self-exclude is needed: the dedup runs at peek, where the current
+    listing's own row is still 'queued' (not a block status).
+    """
+    job_id = _seek_job_id(url)
+    if not job_id:
+        return None
+    db_path = Path(engine_workdir) / "jobs.db"
+    if not db_path.exists():
+        return None
+    placeholders = ",".join("?" for _ in SAME_ROLE_BLOCK_STATUSES)
+    try:
+        with sqlite3.connect(db_path) as conn:
+            rows = conn.execute(
+                f"SELECT url FROM applications WHERE status IN ({placeholders})",
+                tuple(SAME_ROLE_BLOCK_STATUSES),
+            ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    for (row_url,) in rows:
+        if _seek_job_id(row_url) == job_id:
+            return row_url
+    return None
+
+
+@dataclass(frozen=True)
+class DedupDecision:
+    """Outcome of the pre-apply dedup guard.
+
+    kind: 'role'   -> deduped by normalized employer+title (metadata present).
+          'listing'-> metadata missing; deduped by the Seek job id (listing).
+          'unverifiable' -> metadata missing AND no extractable job id; the
+                            caller must NOT silently proceed -- warn + require
+                            explicit confirmation.
+    sibling_url: the duplicate to block on, or None to proceed.
+    requires_confirmation: True only for 'unverifiable'.
+    """
+
+    kind: str
+    sibling_url: str | None
+    requires_confirmation: bool
+
+
+def dedup_before_apply(
+    *, engine_workdir: Path, url: str, company: str, title: str
+) -> DedupDecision:
+    """Single dedup decision for the apply path. NEVER silently 'no key,
+    proceed': role metadata -> same-role check; missing metadata -> fall back to
+    the Seek job-id (listing) check; missing metadata AND no extractable id ->
+    'unverifiable' (caller warns + requires explicit confirmation)."""
+    if role_key(company, title):
+        sibling = same_role_already_applied(
+            engine_workdir=engine_workdir, company=company, title=title, exclude_url=url
+        )
+        return DedupDecision("role", sibling, False)
+    if _seek_job_id(url):
+        sibling = same_listing_already_applied(engine_workdir=engine_workdir, url=url)
+        return DedupDecision("listing", sibling, False)
+    return DedupDecision("unverifiable", None, True)
 
 
 def permafailed_urls(engine_workdir: Path) -> set[str]:

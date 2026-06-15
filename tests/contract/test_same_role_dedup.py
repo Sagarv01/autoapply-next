@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from autoapply_next.engine.persistence import (
+    dedup_before_apply,
     map_status,
     persist_in_progress,
     role_key,
@@ -214,6 +215,72 @@ def test_empty_company_or_title_never_blocks(workdir: Path) -> None:
 
 
 # --------------------------------------------------------------- map_status
+
+
+# ----------------------------------------- dedup_before_apply (empty-metadata guard)
+
+
+def test_dedup_before_apply_uses_role_when_metadata_present(workdir: Path) -> None:
+    _seed(workdir, [("https://au.seek.com/job/1", "Data Engineer", "Acme", "applied")])
+    d = dedup_before_apply(
+        engine_workdir=workdir,
+        url="https://au.seek.com/job/2",
+        company="Acme",
+        title="Data Engineer",
+    )
+    assert d.kind == "role"
+    assert d.sibling_url == "https://au.seek.com/job/1"
+    assert d.requires_confirmation is False
+
+
+def test_dedup_before_apply_falls_back_to_listing_when_metadata_empty(workdir: Path) -> None:
+    """No company/title metadata: instead of silently never-blocking, derive the
+    key from the Seek job id. A prior apply of the SAME listing is detected."""
+    _seed(workdir, [("https://au.seek.com/job/5", "Anything", "Anyone", "applied")])
+    d = dedup_before_apply(
+        engine_workdir=workdir,
+        url="https://au.seek.com/job/5/apply",  # same listing id 5, no metadata
+        company="",
+        title="",
+    )
+    assert d.kind == "listing"
+    assert d.sibling_url == "https://au.seek.com/job/5"
+
+
+def test_dedup_before_apply_listing_no_prior_allows(workdir: Path) -> None:
+    d = dedup_before_apply(
+        engine_workdir=workdir,
+        url="https://au.seek.com/job/9",
+        company="",
+        title="",
+    )
+    assert d.kind == "listing"
+    assert d.sibling_url is None
+    assert d.requires_confirmation is False
+
+
+def test_dedup_before_apply_unverifiable_when_no_metadata_and_no_job_id(workdir: Path) -> None:
+    """No metadata AND no extractable Seek job id: must NOT silently proceed --
+    flag as unverifiable so the caller requires explicit confirmation."""
+    d = dedup_before_apply(
+        engine_workdir=workdir,
+        url="https://example.com/some-external-apply",  # no /job/<id>
+        company="",
+        title="",
+    )
+    assert d.kind == "unverifiable"
+    assert d.sibling_url is None
+    assert d.requires_confirmation is True
+
+
+def test_undedupable_listing_maps_to_skipped() -> None:
+    result = ApplicationResult(
+        job_url="https://example.com/x",
+        status=ApplicationStatus.FAILED,
+        exception_type="UndedupableListingError",
+        error_message="no company/title metadata and no Seek job id",
+    )
+    assert map_status(result) == "skipped"
 
 
 def test_same_role_duplicate_maps_to_skipped() -> None:
