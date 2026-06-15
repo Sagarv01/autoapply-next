@@ -190,22 +190,57 @@ def _make_page(*, ids_to_return: list[str] | None,
     return page
 
 
-def test_verifier_applied_via_job_id(monkeypatch):
+def test_verifier_job_id_alone_is_uncertain_not_applied(monkeypatch):
+    """A bare job-id match no longer reports APPLIED on its own. Seek's applied
+    cards carry no /job link, so the target id appearing in a page href (e.g. a
+    'recommended jobs' rail) is NOT proof of application -- that was the
+    documented false-positive. With applied cards present that do NOT match
+    title+company, the verifier now reports UNCERTAIN (-> SUBMITTED_UNCERTAIN),
+    biasing to halt-on-uncertainty. (Before this fix, this exact input returned
+    APPLIED via the job-id strategy.)"""
     mod = _fake_seek_apply_module()
     mod._Journal._data = {"url": "https://au.seek.com/job/92421026"}
 
-    v = RobustVerifier(poll_window_seconds=5, poll_interval_seconds=0.05)
+    v = RobustVerifier(poll_window_seconds=1, poll_interval_seconds=0.05)
     v.install()
     try:
         page = _make_page(
-            ids_to_return=["91234567", "92421026", "12345"],
-            cards_to_return=[],  # unused; job id matches first
+            ids_to_return=["91234567", "92421026", "12345"],  # target id in a rail
+            cards_to_return=[
+                {"title": "Unrelated Role", "company": "Different Co"},
+            ],
         )
-        result = asyncio.run(mod._verify_applied(page, "anything", "anything"))
+        result = asyncio.run(mod._verify_applied(page, "Target Title", "Target Co"))
+        # Wrap returns True so the engine does not raise; the adapter inspects
+        # last_state and maps UNCERTAIN -> SUBMITTED_UNCERTAIN.
+        assert result is True
+        assert v.last_state.outcome == VerifyOutcome.UNCERTAIN
+        assert v.last_state.outcome is not VerifyOutcome.APPLIED
+    finally:
+        v.uninstall()
+
+
+def test_verifier_job_id_corroborated_by_card_is_applied(monkeypatch):
+    """The id on the page AND an applied card matching title+company -> APPLIED
+    (confident, via the card-scoped title+company match)."""
+    mod = _fake_seek_apply_module()
+    mod._Journal._data = {"url": "https://au.seek.com/job/92421026"}
+
+    v = RobustVerifier(poll_window_seconds=2, poll_interval_seconds=0.05)
+    v.install()
+    try:
+        page = _make_page(
+            ids_to_return=["92421026"],
+            cards_to_return=[
+                {"title": "Platform Engineer", "company": "Hydrogen Group"},
+            ],
+        )
+        result = asyncio.run(
+            mod._verify_applied(page, "Platform Engineer", "Hydrogen Group")
+        )
         assert result is True
         assert v.last_state.outcome == VerifyOutcome.APPLIED
-        assert v.last_state.matched_strategy == "job_id"
-        assert v.last_state.matched_job_id == "92421026"
+        assert v.last_state.matched_strategy == "title_company"
     finally:
         v.uninstall()
 

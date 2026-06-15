@@ -278,6 +278,7 @@ class RobustVerifier(AbstractContextManager):
         deadline = started + self._poll_window
         polls_attempted = 0
         max_cards_seen = 0
+        job_id_seen = False  # the target id was found in a page href (weak signal)
         last_error: str | None = None
 
         while time.monotonic() < deadline:
@@ -300,29 +301,26 @@ class RobustVerifier(AbstractContextManager):
                 await asyncio.sleep(self._poll_interval)
                 continue
 
-            # Strategy 1: job-id match (most robust).
+            # Strategy 1: job-id presence (WEAK signal, never APPLIED alone).
+            # Seek's applied-job cards carry NO /job/<id> link
+            # (seek_apply._scrape_applied_cards), so an id found in a page href
+            # is almost always a 'recommended/similar jobs' rail, not proof of
+            # application. Scanning the whole page for the id was the documented
+            # false-positive (HANDOFF: "a job id in a recommended rail could
+            # read as applied"). So a bare id match no longer declares APPLIED;
+            # it must be corroborated by a title+company applied-card match
+            # (Strategy 2). Uncorroborated, it biases to UNCERTAIN below.
             if job_id:
                 try:
                     ids = await page.evaluate(_FIND_JOB_IDS_JS)
-                    if job_id in (ids or []):
-                        self._last_state = VerificationState(
-                            outcome=VerifyOutcome.APPLIED,
-                            matched_job_id=job_id,
-                            matched_strategy="job_id",
-                            cards_seen=max_cards_seen,
-                            polls_attempted=polls_attempted,
-                            elapsed_seconds=time.monotonic() - started,
-                            detail=(
-                                f"matched job id {job_id} in href on poll "
-                                f"{polls_attempted}"
-                            ),
-                        )
+                    if job_id in (ids or []) and not job_id_seen:
+                        job_id_seen = True
                         logger.info(
-                            "RobustVerifier APPLIED via job_id=%s on poll %d",
+                            "RobustVerifier saw job_id=%s on the page (poll %d); "
+                            "needs title+company corroboration before APPLIED",
                             job_id,
                             polls_attempted,
                         )
-                        return True
                 except Exception as exc:
                     last_error = f"job_id eval: {type(exc).__name__}: {exc}"
                     logger.warning(
@@ -379,6 +377,35 @@ class RobustVerifier(AbstractContextManager):
         elapsed = time.monotonic() - started
 
         if max_cards_seen > 0:
+            if job_id_seen:
+                # The id was on the page but no applied card matched
+                # title+company. Since applied cards carry no /job link, the
+                # bare id is most likely a recommended-jobs rail -- but we
+                # cannot be certain (a true apply whose card title differs would
+                # look identical). Bias to halt-on-uncertainty rather than a
+                # false APPLIED: report UNCERTAIN so the adapter surfaces
+                # SUBMITTED_UNCERTAIN for manual review (a SAME_ROLE_BLOCK
+                # status, so dedup also blocks a silent re-apply).
+                self._last_state = VerificationState(
+                    outcome=VerifyOutcome.UNCERTAIN,
+                    matched_job_id=job_id,
+                    cards_seen=max_cards_seen,
+                    polls_attempted=polls_attempted,
+                    elapsed_seconds=elapsed,
+                    detail=(
+                        f"job id {job_id} seen on page but no applied card "
+                        f"matched title+company after {self._poll_window}s; "
+                        "an uncorroborated job-id is not proof of application"
+                    ),
+                )
+                logger.warning(
+                    "RobustVerifier UNCERTAIN (job-id uncorroborated, %.1fs, "
+                    "%d polls, %d cards)",
+                    elapsed,
+                    polls_attempted,
+                    max_cards_seen,
+                )
+                return True
             self._last_state = VerificationState(
                 outcome=VerifyOutcome.NOT_APPLIED,
                 matched_job_id=job_id,
