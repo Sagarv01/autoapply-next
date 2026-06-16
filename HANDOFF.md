@@ -165,6 +165,30 @@ decision); on a clean Mac the tester right-click-Opens once past Gatekeeper.
 - [ ] **Code signing.** Apple Developer cert (notarization) + Windows EV cert for
   signed installers. Build is unsigned today.
 
+## Qt wizard manual-verify checklist (click-through)
+
+Screen logic is unit-tested with pytest-qt, but rendering, real network calls, and
+the "UI never freezes" behavior can only be verified by a human. Run
+`python -m autoapply_next` and click through. (Appended per screen as the wizard
+is built.)
+
+### Sign-in screen
+- [ ] First launch shows **Sign in** with enabled email + password fields and
+  **Sign in** / **Create account** buttons (no "Skip (dev mode)" anymore).
+- [ ] Valid email + password -> the window **stays responsive** during the call
+  (buttons briefly disable, no spinner-of-death / beachball), then it advances to
+  the next onboarding step. THIS IS THE KEY THREADING CHECK: if the window freezes
+  even briefly, the off-thread wiring is broken.
+- [ ] Wrong password -> a plain red message appears ("We couldn't sign you in.
+  ..."), the screen stays usable, nothing freezes.
+- [ ] Blank fields + Sign in -> inline "Please enter your email and password." with
+  no network call (instant).
+- [ ] Create account with a new email -> if Supabase requires confirmation, a
+  "Check your email to confirm your account" message appears.
+- [ ] Pull the network cable / turn off wifi, then Sign in -> after the ~20s httpx
+  timeout a plain error appears and the app is still usable (it must NOT hang or
+  crash).
+
 ## What is NOT done (and why)
 
 - **L3 fixture replay** (record a real apply, replay the submit against a local
