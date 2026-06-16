@@ -526,6 +526,32 @@ def requeue_held_jobs(engine_workdir: Path, job_ids) -> int:
     return n
 
 
+def ensure_jobs_db_schema(engine_workdir: Path) -> None:
+    """Create jobs.db's schema (seen_jobs + applications) if absent.
+
+    A fresh workdir seeds config.yaml + assets but NOT the DB schema (the desktop
+    app never calls the vendored tracker.init_db that creates it), so the first
+    scrape/apply hit 'no such table: applications'. This mirrors tracker.init_db
+    (vendor/job-finder/tracker.py) so the column set matches what the engine and
+    persistence here read/write. Idempotent (CREATE TABLE IF NOT EXISTS)."""
+    db_path = Path(engine_workdir) / "jobs.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS seen_jobs ("
+            "url TEXT PRIMARY KEY, seen_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS applications ("
+            "url TEXT PRIMARY KEY, title TEXT, company TEXT, board TEXT, "
+            "match_score INTEGER, match_reasoning TEXT, resume_file TEXT, "
+            "cover_letter_file TEXT, status TEXT, notes TEXT, timestamp TEXT, "
+            "failure_count INTEGER NOT NULL DEFAULT 0)"
+        )
+        conn.commit()
+
+
 def status_of(engine_workdir: Path, url: str) -> str | None:
     """Read the current jobs.db status for `url`. None if no row."""
     canonical = canonical_seek_url(url)

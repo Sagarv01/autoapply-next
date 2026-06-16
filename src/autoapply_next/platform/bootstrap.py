@@ -124,6 +124,28 @@ def seed_engine_workdir(
     for sub in ("sessions/seek", "output/dryrun-screenshots", "errors"):
         (workdir / sub).mkdir(parents=True, exist_ok=True)
 
+    # Create jobs.db's schema if absent. A fresh workdir otherwise has a 0-byte
+    # jobs.db with no `applications` table, and the first scrape/apply fails with
+    # 'no such table: applications'. (The vendored tracker.init_db that normally
+    # creates it is never called by the desktop app.)
+    from ..engine.persistence import ensure_jobs_db_schema
+
+    db_path = workdir / "jobs.db"
+    needs_schema = True
+    if db_path.exists() and db_path.stat().st_size > 0:
+        try:
+            import sqlite3
+
+            with sqlite3.connect(db_path) as conn:
+                needs_schema = not conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='applications'"
+                ).fetchone()
+        except Exception:  # noqa: BLE001 - re-create on any read trouble
+            needs_schema = True
+    ensure_jobs_db_schema(workdir)
+    if needs_schema:
+        actions.append("initialised jobs.db schema (applications table)")
+
     return actions
 
 
