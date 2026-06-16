@@ -189,6 +189,18 @@ is built.)
   timeout a plain error appears and the app is still usable (it must NOT hang or
   crash).
 
+### Profile screening form (19 questions)
+- [ ] The form shows an input for all 19 questions; EEO questions (gender,
+  Aboriginal/TSI, disability, veteran) default to "Prefer not to say".
+- [ ] Set "Australian citizen or permanent resident?" to **Yes** -> the two visa
+  fields disappear. Set it to **No** -> they reappear and become required.
+- [ ] Click "Save and continue" with required fields blank -> a red "Please
+  answer: ..." list appears, nothing is saved, the window does not freeze.
+- [ ] Fill everything, Save -> the window stays responsive during the write, then
+  it advances. Re-open the screen -> your answers are still there (persisted to
+  config.yaml's candidate block).
+- [ ] Salary accepts "130000" or "130,000" and is stored as a number.
+
 ## What is NOT done (and why)
 
 - **L3 fixture replay** (record a real apply, replay the submit against a local
