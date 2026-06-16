@@ -68,10 +68,54 @@ async def test_export_base_documents_uses_vendored_resume_export(tmp_path):
     async def base_resume(job):
         return "base_resume.pdf"
 
-    fake = types.SimpleNamespace(_export_base_resume_pdf=base_resume, ASSETS_DIR=tmp_path)
+    fake = types.SimpleNamespace(
+        _export_base_resume_pdf=base_resume,
+        ASSETS_DIR=tmp_path,
+        detect_libreoffice=lambda: "/soffice",
+        _libreoffice_path="/already-set",
+    )
     # no base cover present -> cover is ""
     out = await adapter._export_base_documents(_Job(), fake)
     assert out == ("base_resume.pdf", "")
+
+
+async def test_export_base_documents_detects_libreoffice_when_unset(tmp_path):
+    # The base path bypasses tailorer.tailor()'s own detection; without detecting
+    # here, _run_libreoffice gets a None binary and the apply fails at tailor.
+    calls = {"detect": 0}
+
+    async def base_resume(job):
+        return "r.pdf"
+
+    def detect():
+        calls["detect"] += 1
+        return "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+
+    fake = types.SimpleNamespace(
+        _export_base_resume_pdf=base_resume,
+        ASSETS_DIR=tmp_path,  # no cover
+        detect_libreoffice=detect,
+        _libreoffice_path=None,
+    )
+    await adapter._export_base_documents(_Job(), fake)
+    assert calls["detect"] == 1
+    assert fake._libreoffice_path == "/Applications/LibreOffice.app/Contents/MacOS/soffice"
+
+
+async def test_export_base_documents_skips_detect_if_already_set(tmp_path):
+    calls = {"detect": 0}
+
+    async def base_resume(job):
+        return "r.pdf"
+
+    fake = types.SimpleNamespace(
+        _export_base_resume_pdf=base_resume,
+        ASSETS_DIR=tmp_path,
+        detect_libreoffice=lambda: calls.__setitem__("detect", calls["detect"] + 1) or "/x",
+        _libreoffice_path="/already/soffice",
+    )
+    await adapter._export_base_documents(_Job(), fake)
+    assert calls["detect"] == 0  # already detected, don't re-run
 
 
 async def test_export_base_cover_absent_returns_empty(tmp_path):

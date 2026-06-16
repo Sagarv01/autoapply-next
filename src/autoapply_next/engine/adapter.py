@@ -905,6 +905,11 @@ async def _produce_documents(job, tailorer):
 async def _export_base_documents(job, tailorer):
     """Base resume + base cover as PDFs, no LLM. Reuses the engine's own
     docx->PDF machinery (LibreOffice) so the output matches a normal apply."""
+    # tailorer.tailor() lazily detects LibreOffice on first use; the base path
+    # bypasses tailor(), so detect here too. Without this, _run_libreoffice is
+    # called with a None binary -> "expected str... not NoneType" at tailor.
+    if getattr(tailorer, "_libreoffice_path", None) is None:
+        tailorer._libreoffice_path = tailorer.detect_libreoffice()
     resume_pdf = await tailorer._export_base_resume_pdf(job)
     cover_pdf = await _export_base_cover_pdf(job, tailorer)
     return resume_pdf, cover_pdf
