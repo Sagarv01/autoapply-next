@@ -496,6 +496,36 @@ def count_today_submissions(engine_workdir: Path) -> int:
         return 0
 
 
+def requeue_held_jobs(engine_workdir: Path, job_ids) -> int:
+    """Flip jobs.db 'held' rows back to 'queued' for the given job ids, so the
+    next batch re-applies them once their blocking screening question is answered.
+
+    Matches by job id appearing in the row URL (the Seek numeric id; see
+    screening.interceptor.job_id_from_listing). Only 'held' rows are touched, so a
+    sibling that was already applied/failed is never reopened. Returns the count
+    requeued. Missing db / empty ids -> 0."""
+    ids = [str(j) for j in (job_ids or []) if str(j).strip()]
+    if not ids:
+        return 0
+    db_path = Path(engine_workdir) / "jobs.db"
+    if not db_path.exists():
+        return 0
+    n = 0
+    try:
+        with sqlite3.connect(db_path) as conn:
+            for jid in ids:
+                cur = conn.execute(
+                    "UPDATE applications SET status='queued' "
+                    "WHERE status='held' AND url LIKE ?",
+                    (f"%{jid}%",),
+                )
+                n += cur.rowcount
+    except sqlite3.OperationalError as exc:
+        logger.warning("requeue_held_jobs failed: %s", exc)
+        return 0
+    return n
+
+
 def status_of(engine_workdir: Path, url: str) -> str | None:
     """Read the current jobs.db status for `url`. None if no row."""
     canonical = canonical_seek_url(url)
