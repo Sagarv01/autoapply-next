@@ -57,6 +57,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import shutil
 import sys
 import time
 from dataclasses import replace
@@ -78,6 +79,7 @@ from .progress import ProgressEvent, ProgressStage
 from .results import ApplicationResult, ApplicationStatus
 from .safety import DryRunReached, SafetyGate
 from .verifier import RobustVerifier, VerifyOutcome
+from . import tailoring_policy
 
 logger = logging.getLogger(__name__)
 
@@ -635,7 +637,11 @@ async def apply_to_job(
                 progress(
                     ProgressEvent(
                         stage=ProgressStage.TAILOR,
-                        message="Generating tailored resume + cover letter",
+                        message=(
+                            "Generating tailored resume + cover letter"
+                            if tailoring_policy.tailoring_allowed()
+                            else "Preparing your resume and cover letter"
+                        ),
                     )
                 )
 
@@ -651,7 +657,7 @@ async def apply_to_job(
                     non_retryable_tailor = (tailor_quality_exc,)
 
                 async def _tailor_op():
-                    return await tailorer.tailor(job, tier="full")
+                    return await _produce_documents(job, tailorer)
 
                 ok, value, exc = await _bounded_retry(
                     "tailor",
@@ -881,6 +887,46 @@ async def apply_to_job(
                             vstate.detail if vstate else None
                         ),
                     )
+
+
+async def _produce_documents(job, tailorer):
+    """The (resume_pdf, cover_pdf) for this job.
+
+    Pro tailors per-job; Free/Basic apply with the base resume + cover as-is (no
+    LLM, so no Pro-gate 403 and no wasted call). The tier is decided once per
+    batch by the worker via tailoring_policy; the proxy's Pro-gate is still the
+    real enforcement.
+    """
+    if tailoring_policy.tailoring_allowed():
+        return await tailorer.tailor(job, tier="full")
+    return await _export_base_documents(job, tailorer)
+
+
+async def _export_base_documents(job, tailorer):
+    """Base resume + base cover as PDFs, no LLM. Reuses the engine's own
+    docx->PDF machinery (LibreOffice) so the output matches a normal apply."""
+    resume_pdf = await tailorer._export_base_resume_pdf(job)
+    cover_pdf = await _export_base_cover_pdf(job, tailorer)
+    return resume_pdf, cover_pdf
+
+
+async def _export_base_cover_pdf(job, tailorer) -> str:
+    """Convert the user's base cover letter docx to PDF as-is. Returns "" when the
+    user never uploaded a base cover (the apply proceeds without one)."""
+    base_cover = Path(tailorer.ASSETS_DIR) / "base_cover_letter.docx"
+    if not base_cover.exists():
+        return ""
+    filename = tailorer.make_filename("CoverLetter", job.company, job.title)
+    out_dir = Path(tailorer.OUTPUT_DIR)
+    temp_docx = out_dir / filename.replace(".pdf", ".docx")
+    shutil.copy(base_cover, temp_docx)
+    try:
+        async with tailorer._pdf_lock:
+            await tailorer._run_libreoffice(str(temp_docx), str(out_dir))
+    finally:
+        temp_docx.unlink(missing_ok=True)
+    pdf = out_dir / filename
+    return str(pdf) if pdf.exists() else ""
 
 
 def _failure(

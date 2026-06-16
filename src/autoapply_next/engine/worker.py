@@ -57,6 +57,8 @@ from .batch import (
     prepare_batch,
     run_batch,
 )
+from . import tailoring_policy
+from ..billing import proxy_billing
 from .persistence import (
     count_today_submissions,
     is_fatal_condition,
@@ -343,6 +345,21 @@ class EngineWorker(QObject):
             return False
         return True
 
+    async def _refresh_tailoring_policy(self) -> None:
+        """Set the per-job tailoring policy from the user's tier before applying:
+        Pro tailors, Free/Basic apply with base docs (no LLM, no Pro-gate 403). A
+        fetch failure leaves the policy unchanged (the proxy gate still enforces)."""
+        try:
+            status = await proxy_billing.fetch_subscription_status()
+            tailoring_policy.set_tailoring_allowed(
+                tailoring_policy.allows_tailoring(status.get("tier"))
+            )
+        except Exception:  # noqa: BLE001 - tier fetch is best-effort
+            logger.warning(
+                "tailoring policy: could not fetch tier; leaving unchanged",
+                exc_info=True,
+            )
+
     def _emit_cooldown(self, seconds: float) -> None:
         # Called from the engine loop thread; emitting a Qt signal is thread-safe
         # (queued to the GUI thread). Only surface a real pacing gap, not the
@@ -365,6 +382,7 @@ class EngineWorker(QObject):
         self._current_task = asyncio.current_task()
         try:
             try:
+                await self._refresh_tailoring_policy()
                 result = await apply_to_job(
                     job_url=job_url,
                     engine_workdir=self._engine_workdir,
@@ -522,6 +540,8 @@ class EngineWorker(QObject):
         )
         try:
             try:
+                await self._refresh_tailoring_policy()
+
                 def on_progress(done, total, result):
                     self.batch_apply_progress.emit(done, total, result)
                     msg = f"[run {done}/{total}] {result.status.value}"
@@ -590,6 +610,8 @@ class EngineWorker(QObject):
 
         try:
             try:
+                # Decide tailoring (Pro) vs base docs (Free/Basic) once for the run.
+                await self._refresh_tailoring_policy()
                 # ---------------------------------------------- Phase 0
                 # Apply jobs already queued in jobs.db FIRST. Score-desc;
                 # eligibility filter is queued_urls_for_batch (status='queued'
