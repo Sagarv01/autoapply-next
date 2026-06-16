@@ -461,6 +461,36 @@ def _compose_notes(result: ApplicationResult, new_status: str) -> str:
 # --------------------------------------------------------------------- reads
 
 
+# jobs.db statuses that represent a real submission consuming a Seek quick-apply
+# slot. Both count against the daily cap (SUBMITTED_UNCERTAIN went out even if the
+# verifier was unsure).
+_SUBMISSION_STATUSES = ("applied", "submitted_uncertain")
+
+
+def count_today_submissions(engine_workdir: Path) -> int:
+    """Count real submissions recorded in jobs.db with today's (local) date.
+
+    Backs the invisible per-day submission cap, which is per-DAY across runs.
+    Counts only `applied` + `submitted_uncertain` rows whose timestamp falls on
+    the local calendar day. Missing/unreadable db -> 0 (cap simply not enforced
+    rather than the run crashing)."""
+    db_path = Path(engine_workdir) / "jobs.db"
+    if not db_path.exists():
+        return 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    placeholders = ",".join("?" for _ in _SUBMISSION_STATUSES)
+    try:
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM applications "
+                f"WHERE status IN ({placeholders}) AND timestamp LIKE ?",
+                (*_SUBMISSION_STATUSES, f"{today}%"),
+            ).fetchone()
+            return int(row[0]) if row else 0
+    except sqlite3.OperationalError:
+        return 0
+
+
 def status_of(engine_workdir: Path, url: str) -> str | None:
     """Read the current jobs.db status for `url`. None if no row."""
     canonical = canonical_seek_url(url)

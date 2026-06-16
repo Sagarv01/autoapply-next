@@ -57,7 +57,11 @@ from .batch import (
     prepare_batch,
     run_batch,
 )
-from .persistence import is_fatal_condition, queued_urls_for_batch
+from .persistence import (
+    count_today_submissions,
+    is_fatal_condition,
+    queued_urls_for_batch,
+)
 from .progress import ProgressEvent
 from .results import ApplicationResult, ApplicationStatus
 from .scraping import ScrapeResult, scrape_and_score
@@ -72,7 +76,29 @@ from .session_bootstrap import (
 # single scrape-and-auto-apply pass so a wide scrape cannot run for hours.
 MAX_APPLIES_PER_RUN = 100
 
+# Invisible per-DAY submission cap, enforced across runs (not just per batch).
+# Not user-configurable: the app silently stops submitting once a real day's
+# worth of applications has gone out, then resumes the next day. Distinct from
+# MAX_APPLIES_PER_RUN (a single pass) though both happen to be 100.
+DAILY_SUBMIT_CAP = 100
+
 logger = logging.getLogger(__name__)
+
+
+def daily_cap_kwargs(engine_workdir, allow_real_submit: bool, requested: int = 0) -> dict:
+    """run_batch kwargs for the invisible 100/day cap.
+
+    Live runs always get the 100/day ceiling plus a today_count_fn that counts
+    today's already-applied rows (so the cap is per-DAY across runs). A dry-run
+    files no application, so it is never capped (empty dict -> run_batch default
+    daily_cap=0). A smaller explicit `requested` cap is honored but can never
+    raise the ceiling above DAILY_SUBMIT_CAP.
+    """
+    if not allow_real_submit:
+        return {}
+    cap = DAILY_SUBMIT_CAP if requested <= 0 else min(requested, DAILY_SUBMIT_CAP)
+    wd = Path(engine_workdir)
+    return {"daily_cap": cap, "today_count_fn": lambda: count_today_submissions(wd)}
 
 
 class EngineWorker(QObject):
@@ -504,6 +530,7 @@ class EngineWorker(QObject):
                     is_stopped=self._stop_batch_event.is_set,
                     throttle_range_seconds=throttle_range,
                     tally=tally,
+                    **daily_cap_kwargs(self._engine_workdir, allow_real_submit),
                 )
                 self.batch_apply_finished.emit(tally)
             except asyncio.CancelledError:
@@ -613,7 +640,7 @@ class EngineWorker(QObject):
                         tally=tally,
                         fatal_classifier=is_fatal_condition,
                         max_consecutive_failures=3,
-                        daily_cap=daily_cap,
+                        **daily_cap_kwargs(self._engine_workdir, allow_real_submit, daily_cap),
                     )
                     applies_this_run = len(tally.per_job)
                     logger.info(
@@ -731,7 +758,7 @@ class EngineWorker(QObject):
                     tally=tally,
                     fatal_classifier=is_fatal_condition,
                     max_consecutive_failures=3,
-                    daily_cap=daily_cap,
+                    **daily_cap_kwargs(self._engine_workdir, allow_real_submit, daily_cap),
                 )
                 logger.info(
                     "Phase 2 complete: total %d per_job entries, "
