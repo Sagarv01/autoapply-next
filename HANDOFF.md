@@ -262,6 +262,34 @@ proxy) before this checklist applies.
 - [ ] When today's 100-application cap is reached, it says "That's all of today's
   applications done. AutoApply will start again tomorrow."
 
+### Version floor (update wall)
+- [ ] Set the proxy's MIN_CLIENT_VERSION above the app's version and relaunch ->
+  after the startup check the app shows "Time to update" with a Download button
+  and the toolbar is disabled. (Below/at the floor: nothing happens, app is normal.)
+- [ ] The download button opens https://autoapply.com.au/download in the browser.
+
+## Phase F packaging (mac + win)
+
+The PyInstaller spec (`packaging/pyinstaller.spec`) is cross-platform and
+`collect_submodules("autoapply_next")` bundles every module (including all the new
+wizard/billing/held/version-check screens), so no spec change is needed per screen.
+
+- **macOS:** `pyinstaller packaging/pyinstaller.spec` -> `dist/AutoApply Next.app`
+  (onedir BUNDLE; smoke-tested previously via the absolute-import launcher
+  `packaging/autoapply_launch.py`). Re-run the smoke checklist above after any
+  build.
+- **Windows:** run the SAME command on a Windows box -> `dist/AutoApplyNext/AutoApplyNext.exe`
+  (onedir; the spec's EXE+COLLECT branch, `console=False`, `.ico` from
+  `resources/icon.ico`). Build + smoke-test on real Windows (can't be done from
+  macOS).
+- **In-app version check:** DONE (this build). The app reads the proxy's
+  `min_client_version` from /api/config at startup and walls itself if below the
+  floor, so a stale client is told to update before it hits a 426 mid-run.
+- **Code signing / installers: BLOCKED on certs (your call).** macOS notarization
+  needs an Apple Developer cert; Windows Authenticode needs an EV cert
+  (`packaging/windows/sign.ps1` is ready). Wrapping the onedir into a .dmg / NSIS
+  installer is the same cert-gated step. See `packaging/CERT_CHECKLIST.md`.
+
 ## What is NOT done (and why)
 
 - **L3 fixture replay** (record a real apply, replay the submit against a local
