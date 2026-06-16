@@ -69,6 +69,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import pacing
 from .adapter import _engine_workdir, apply_to_job
 from .progress import ProgressEvent
 from .results import ApplicationResult, ApplicationStatus
@@ -118,6 +119,32 @@ def live_safe_throttle_range(
         # randomization band rather than a fixed gap.
         hi = max(APPLY_GAP_MAX, lo)
     return (lo, hi)
+
+
+def _local_now():
+    """Local wall-clock now, used to pick the time-of-day submit-pacing band."""
+    from datetime import datetime
+
+    return datetime.now()
+
+
+def _submit_gap(
+    allow_real_submit: bool,
+    effective_throttle: tuple[int, int],
+    *,
+    now=None,
+) -> float:
+    """The inter-submit gap (seconds).
+
+    LIVE: the time-of-day pacing gate (`pacing.next_submit_gap`) — weekday daytime
+    60-90s, nights/weekends 60-180s — which can only ever extend the wait and
+    never drops below the 60s floor. DRY-RUN: the caller's configurable band
+    (which may opt out down to 0, since dry-run files no application). The pacing
+    gate sits ON TOP of `live_safe_throttle_range`, never under it.
+    """
+    if allow_real_submit:
+        return pacing.next_submit_gap(now or _local_now())
+    return random.uniform(effective_throttle[0], effective_throttle[1])
 
 
 # ----------------------------------------------------------------------------- types
@@ -629,11 +656,10 @@ async def run_batch(
                     tally.consecutive_failures = consecutive_failures
                     return tally
 
-            # Throttle between jobs. Last iteration: no need.
+            # Throttle between jobs. Last iteration: no need. Live runs pace by
+            # time of day (never below the 60s floor); dry-run uses the band.
             if i < total:
-                gap = random.uniform(
-                    effective_throttle[0], effective_throttle[1]
-                )
+                gap = _submit_gap(allow_real_submit, effective_throttle)
                 await _async_throttle(gap, is_stopped, is_cancelled)
 
         tally.consecutive_failures = consecutive_failures
