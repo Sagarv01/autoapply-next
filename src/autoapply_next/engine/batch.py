@@ -201,6 +201,9 @@ class BatchRunResult:
     failed: int = 0
     skipped_low_score: int = 0
     dry_run_verified: int = 0
+    held: int = 0
+    """ApplicationStatus.HELD: a screening question needs the user's answer, so
+    the apply was aborted before submitting. Not a failure; resumes once answered."""
     cancelled: int = 0
     per_job: list[ApplicationResult] = field(default_factory=list)
     stop_reason: str = "completed"
@@ -558,6 +561,8 @@ async def run_batch(
                 tally.dry_run_verified += 1
             elif result.status == ApplicationStatus.SKIPPED_LOW_SCORE:
                 tally.skipped_low_score += 1
+            elif result.status == ApplicationStatus.HELD:
+                tally.held += 1
             elif result.status == ApplicationStatus.FAILED:
                 tally.failed += 1
             elif result.status == ApplicationStatus.CANCELLED:

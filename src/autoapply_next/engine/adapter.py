@@ -63,6 +63,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from ..screening.held_queue import HeldQueue
+from ..screening.interceptor import QuestionHeldError, ScreeningInterceptor
 from .hooks import EngineHooks
 from .llm_adapter import ProxyLLM
 from .persistence import (
@@ -469,8 +471,16 @@ async def apply_to_job(
         import matcher  # type: ignore[import-not-found]
         import tailorer  # type: ignore[import-not-found]
 
+        # Held-queue interception: if a screening question can't be answered from
+        # the candidate's facts, the interceptor raises QuestionHeldError instead
+        # of letting the engine guess. Persisted to the workdir so the question
+        # survives a restart.
+        held_path = engine_workdir / "held_questions.json"
+        held_queue = HeldQueue.load(held_path)
+
         with ProxyLLM(), \
                 EngineHooks(journal_path=journal_path) as hooks, \
+                ScreeningInterceptor(held_queue, save_path=held_path), \
                 SafetyGate(
                     allow_real_submit=allow_real_submit,
                     screenshot_dir=screenshot_dir,
@@ -830,6 +840,23 @@ async def apply_to_job(
                         screening_answers=hooks.captured.screening_answers,
                         dry_run_screenshot=dry.screenshot_path,
                     )
+                except QuestionHeldError as held:
+                    # A screening question needs the user. Not a failure: abort
+                    # before submitting and park the job as 'held' (resumes once
+                    # answered). Mirrors the DryRunReached non-failure return.
+                    hooks.read_last_journal()
+                    held_result = ApplicationResult(
+                        job_url=job_url,
+                        status=ApplicationStatus.HELD,
+                        score=score,
+                        reasoning=reasoning,
+                        resume_pdf=Path(resume_pdf) if resume_pdf else None,
+                        cover_pdf=Path(cover_pdf) if cover_pdf else None,
+                        cover_letter_text=hooks.captured.cover_letter_text,
+                        screening_answers=hooks.captured.screening_answers,
+                        error_message=f"Waiting on your answer: {held.question}",
+                    )
+                    return _persist_and_check(held_result, engine_workdir)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

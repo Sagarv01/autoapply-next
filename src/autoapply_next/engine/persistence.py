@@ -175,6 +175,11 @@ def map_status(result: ApplicationResult) -> str | None:
         return "submitted_uncertain"
     if s == ApplicationStatus.SKIPPED_LOW_SCORE:
         return "skipped"
+    if s == ApplicationStatus.HELD:
+        # Non-terminal: excluded from the queued batch (the prepare SQL filters
+        # status='queued') so it is not re-attempted, but resumable — answering
+        # the held question re-queues it. Deliberately NOT in TERMINAL_STATUSES.
+        return "held"
     if s == ApplicationStatus.FAILED:
         exc = result.exception_type or ""
         msg = (result.error_message or "").lower()

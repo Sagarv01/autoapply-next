@@ -25,11 +25,17 @@ from .resolver import ScreeningResolver
 logger = logging.getLogger(__name__)
 
 
-class QuestionHeldError(Exception):
+class QuestionHeldError(BaseException):
     """Raised mid-apply when a screening question must be answered by the user.
 
     Aborts the current job's apply without submitting. Not a failure: the apply
-    is held pending the user's answer."""
+    is held pending the user's answer.
+
+    Inherits BaseException (not Exception) on purpose, exactly like
+    asyncio.CancelledError: the vendored engine wraps its `_claude_answer` calls
+    in `except Exception` and would otherwise SWALLOW this and fall through to a
+    guessed answer (seek_apply.py:1076). As a BaseException it propagates cleanly
+    past those handlers up to the adapter, which turns it into a HELD result."""
 
     def __init__(self, job_id: str, question: str):
         super().__init__(f"held screening question for job {job_id}: {question!r}")

@@ -123,6 +123,28 @@ def test_install_restores_original(monkeypatch):
     assert fake._claude_answer is original
 
 
+def test_question_held_error_is_baseexception_not_exception():
+    # Must propagate past the vendored engine's `except Exception` around
+    # _claude_answer (seek_apply.py:1076), exactly like asyncio.CancelledError.
+    assert issubclass(QuestionHeldError, BaseException)
+    assert not issubclass(QuestionHeldError, Exception)
+
+
+async def test_held_error_survives_a_broad_except_exception(monkeypatch):
+    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply([]))
+    with ScreeningInterceptor(HeldQueue()):
+        outcome = "not-raised"
+        try:
+            await sys.modules["seek_apply"]._claude_answer(
+                "An unknown question?", None, _Job(url="https://www.seek.com.au/job/9")
+            )
+        except Exception:  # noqa: BLE001 - this is the swallow the engine would do
+            outcome = "swallowed"
+        except QuestionHeldError:
+            outcome = "propagated"
+    assert outcome == "propagated"
+
+
 def test_skips_module_without_claude_answer(monkeypatch):
     bare = types.ModuleType("seek_apply")
     monkeypatch.setitem(sys.modules, "seek_apply", bare)

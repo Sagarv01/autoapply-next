@@ -24,6 +24,11 @@ class ApplicationStatus(str, Enum):
     SKIPPED_LOW_SCORE = "skipped_low_score"
     """Match score below the configured threshold; tailor + apply not attempted."""
 
+    HELD = "held"
+    """A screening question could not be answered from the candidate's facts, so
+    the apply was aborted BEFORE submitting (the engine never guesses). Not a
+    failure: the job is held pending the user's answer, then resumes."""
+
     FAILED = "failed"
     """Stage terminated with an error. See `error_message`."""
 
