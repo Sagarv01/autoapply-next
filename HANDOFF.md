@@ -262,6 +262,18 @@ proxy) before this checklist applies.
 - [ ] When today's 100-application cap is reached, it says "That's all of today's
   applications done. AutoApply will start again tomorrow."
 
+### Free vs Pro tailoring (base docs)
+- [ ] Signed in as a **Free/Basic** user, run a dry-run apply -> the status reads
+  "Preparing your resume and cover letter" (NOT "Generating tailored..."), the
+  apply uses the base resume + base cover as-is, and there is NO Pro-only 403 /
+  upgrade bounce. (Requires LibreOffice for the docx->PDF conversion, same as a
+  normal apply.)
+- [ ] Signed in as **Pro**, run a dry-run apply -> "Generating tailored resume +
+  cover letter" and the documents are per-job tailored.
+- [ ] If the tier fetch fails (offline at batch start) and the user is Free,
+  tailoring is attempted, the proxy returns 403, and the Upgrade screen appears
+  (the safety net) rather than a silent failure.
+
 ### Version floor (update wall)
 - [ ] Set the proxy's MIN_CLIENT_VERSION above the app's version and relaunch ->
   after the startup check the app shows "Time to update" with a Download button
