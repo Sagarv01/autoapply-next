@@ -147,6 +147,24 @@ Both runs passed all five. The bundle excludes the dev `.env` (verified absent)
 and ships `config.yaml.example` as the seed template. It is unsigned (per your
 decision); on a clean Mac the tester right-click-Opens once past Gatekeeper.
 
+## Pre-launch checklist (production)
+
+- [ ] **Supabase SECRET key for the deployed proxy.** Production Stripe webhooks
+  write the user's tier to Supabase via the proxy's service-side client. Provision
+  a modern **`sb_secret_...`** key (NOT the legacy `service_role` JWT, which
+  Supabase is deprecating by end of 2026) and set it as `SUPABASE_SECRET_KEY` in
+  the proxy's SSM (`/autoapply/prod/`). The proxy already prefers
+  `SUPABASE_SECRET_KEY` over the legacy `SUPABASE_SERVICE_ROLE_KEY` and sends it as
+  an opaque `apikey`/`Bearer` value (the gateway resolves it to the service role;
+  the proxy never decodes it as a JWT). Until this key is set, the deployed proxy
+  cannot persist tier flips from real webhooks. The client already ships the
+  matching `sb_publishable_` key for sign-in.
+- [ ] **Real Stripe prices.** Test-mode Basic/Pro products + prices are created and
+  the money path is E2E-verified (see proxy-server/STRIPE_TEST_IDS.md). Set real
+  amounts + wire the live price IDs before charging.
+- [ ] **Code signing.** Apple Developer cert (notarization) + Windows EV cert for
+  signed installers. Build is unsigned today.
+
 ## What is NOT done (and why)
 
 - **L3 fixture replay** (record a real apply, replay the submit against a local
