@@ -66,6 +66,7 @@ from typing import Awaitable, Callable
 
 from ..screening.held_queue import HeldQueue
 from ..screening.interceptor import QuestionHeldError, ScreeningInterceptor
+from .cover_letter import OptionalCoverLetter
 from .hooks import EngineHooks
 from .llm_adapter import ProxyLLM
 from .persistence import (
@@ -483,6 +484,7 @@ async def apply_to_job(
         with ProxyLLM(), \
                 EngineHooks(journal_path=journal_path) as hooks, \
                 ScreeningInterceptor(held_queue, save_path=held_path), \
+                OptionalCoverLetter(), \
                 SafetyGate(
                     allow_real_submit=allow_real_submit,
                     screenshot_dir=screenshot_dir,
