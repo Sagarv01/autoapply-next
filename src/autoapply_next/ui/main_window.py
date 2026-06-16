@@ -28,14 +28,15 @@ from ..engine.worker import EngineWorker
 from ..safe_ui import get_bus, safe_slot, show_error_dialog
 from .batch_screen import BatchScreen
 from ..auth.manager import AuthManager
+from ..onboarding import state as ob
 from .async_task import AsyncTaskRunner
+from .onboarding_wizard import OnboardingWizard
 from .profile_screen import ProfileScreen
 from .queue_screen import QueueScreen
 from .results_screen import ResultsScreen
 from .run_screen import RunScreen
 from .session_setup_screen import SessionSetupScreen
 from .settings_screen import SettingsScreen
-from .signin_screen import SignInScreen
 from .settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,11 @@ class MainWindow(QMainWindow):
 
         # Screens.
         self._stack = QStackedWidget(self)
-        self._signin = SignInScreen(auth_manager=self._auth, runner=self._runner)
+        # The onboarding wizard (sign-in + the 19-field profile + documents +
+        # criteria + honesty line). It gates the bot until set-up is complete.
+        self._onboarding = OnboardingWizard(
+            engine_workdir=engine_workdir, auth_manager=self._auth, runner=self._runner
+        )
         self._session = SessionSetupScreen(
             engine_workdir=engine_workdir, worker=self._worker
         )
@@ -103,11 +108,13 @@ class MainWindow(QMainWindow):
         # Scrape-and-apply: the moment auto-apply kicks off, swap to the
         # Batch screen so the user can see live progress and reach STOP.
         self._queue.auto_apply_started.connect(self._on_auto_apply_started)
-        # On a successful sign-in the screen emits `authenticated(user_id)`; we
-        # route to the next onboarding step.
-        self._signin.authenticated.connect(self._on_signin_authenticated)
+        # The wizard emits `completed` once every onboarding step is done; that
+        # unlocks the bot.
+        self._onboarding.completed.connect(self._on_onboarding_complete)
+        # The apply screens stay locked until onboarding is complete.
+        self._bot_screens = [self._queue, self._run, self._batch, self._results]
         for screen in [
-            self._signin,
+            self._onboarding,
             self._session,
             self._profile,
             self._queue,
@@ -123,10 +130,12 @@ class MainWindow(QMainWindow):
         self._build_status_bar()
         self._wire_signals()
 
-        # Walking-skeleton default: start on Run screen.
-        # Phase 3 changes this to SignInScreen on first launch.
-        self._stack.setCurrentWidget(self._run)
-        self._highlight_action(self._run)
+        # Gate the bot behind onboarding: show the wizard (or the bot if already
+        # set up). Then silently try to restore a stored session OFF the GUI
+        # thread; if it restores, re-apply the gate.
+        self._runner.succeeded.connect(self._on_runner_succeeded)
+        self._apply_onboarding_gate()
+        self._runner.submit(self._auth.restore, token="auth_restore")
 
         # Wire ALLOW_REAL_SUBMIT changes to update the worker / status bar.
         self._settings.allow_real_submit_changed.connect(
@@ -143,7 +152,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.LeftToolBarArea, toolbar)
         self._actions: dict[QWidget, QAction] = {}
         screens = [
-            (self._signin, "Sign in"),
+            (self._onboarding, "Set up"),
             (self._session, "Seek session"),
             (self._profile, "Profile"),
             (self._queue, "Queue"),
@@ -242,12 +251,37 @@ class MainWindow(QMainWindow):
         # Hand off Queue -> Batch so the user lands on STOP + live progress.
         self._goto(self._batch)
 
-    @Slot(str)
+    # -------------------------------------------------------------- onboarding gate
+
+    def _apply_onboarding_gate(self) -> None:
+        """Lock the apply screens until onboarding is complete; show the wizard
+        while it is not."""
+        complete = ob.is_onboarding_complete(
+            self._engine_workdir,
+            signed_in=self._auth.signed_in,
+            acknowledged=ob.load_flags(self._engine_workdir)["acknowledged"],
+        )
+        for screen in self._bot_screens:
+            action = self._actions.get(screen)
+            if action is not None:
+                action.setEnabled(complete)
+        # While set-up is incomplete, keep the user on a permitted screen (the
+        # wizard, or the always-available setup screens), never a locked one.
+        allowed = {self._onboarding, self._session, self._profile, self._settings_screen}
+        if not complete and self._stack.currentWidget() not in allowed:
+            self._goto(self._onboarding)
+
+    @Slot(object, object)
+    def _on_runner_succeeded(self, result, token) -> None:
+        if token == "auth_restore":
+            self._apply_onboarding_gate()
+
+    @Slot()
     @safe_slot
-    def _on_signin_authenticated(self, _user_id: str) -> None:
-        # Stub sign-in done; nudge to the natural next step.
-        self.statusBar().showMessage("Signed in (dev mode). Set up your Seek session next.", 5000)
-        self._goto(self._session)
+    def _on_onboarding_complete(self) -> None:
+        self._apply_onboarding_gate()
+        self.statusBar().showMessage("You're all set. AutoApply is ready.", 5000)
+        self._goto(self._queue)
 
     # Also bump the worker's threshold when Settings changes.
     @Slot(int)
