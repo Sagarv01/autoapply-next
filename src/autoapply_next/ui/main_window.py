@@ -30,6 +30,8 @@ from .batch_screen import BatchScreen
 from ..auth.manager import AuthManager
 from ..onboarding import state as ob
 from .async_task import AsyncTaskRunner
+from .billing_screen import BillingScreen
+from .held_queue_screen import HeldQueueScreen
 from .onboarding_wizard import OnboardingWizard
 from .profile_screen import ProfileScreen
 from .queue_screen import QueueScreen
@@ -101,6 +103,10 @@ class MainWindow(QMainWindow):
             settings=self._settings,
         )
         self._results = ResultsScreen(engine_workdir=engine_workdir)
+        self._held_screen = HeldQueueScreen(
+            engine_workdir=engine_workdir, runner=self._runner
+        )
+        self._billing = BillingScreen(runner=self._runner)
         self._settings_screen = SettingsScreen(settings=self._settings)
 
         # Wire Queue -> Run handoff: selecting a row swaps to Run with URL preloaded.
@@ -113,6 +119,10 @@ class MainWindow(QMainWindow):
         self._onboarding.completed.connect(self._on_onboarding_complete)
         # The apply screens stay locked until onboarding is complete.
         self._bot_screens = [self._queue, self._run, self._batch, self._results]
+        # A batch can park jobs as "held" (unknown screening question) and can hit
+        # a Pro-only tailoring gate; surface both when a batch finishes.
+        self._worker.batch_apply_finished.connect(self._on_batch_apply_finished)
+        self._held_screen.questions_changed.connect(self._on_held_count_changed)
         for screen in [
             self._onboarding,
             self._session,
@@ -121,6 +131,8 @@ class MainWindow(QMainWindow):
             self._run,
             self._batch,
             self._results,
+            self._held_screen,
+            self._billing,
             self._settings_screen,
         ]:
             self._stack.addWidget(screen)
@@ -160,6 +172,8 @@ class MainWindow(QMainWindow):
             (self._run, "Run"),
             (self._batch, "Batch"),
             (self._results, "Results"),
+            (self._held_screen, "Waiting on you"),
+            (self._billing, "Upgrade"),
             (self._settings_screen, "Settings"),
         ]
         for i, (screen, label) in enumerate(screens):
@@ -195,6 +209,11 @@ class MainWindow(QMainWindow):
     def _goto(self, screen: QWidget) -> None:
         self._stack.setCurrentWidget(screen)
         self._highlight_action(screen)
+        # These two pull live state; refresh when shown (off-thread for billing).
+        if screen is self._billing:
+            self._billing.refresh()
+        elif screen is self._held_screen:
+            self._held_screen.refresh()
 
     def _highlight_action(self, screen: QWidget) -> None:
         for s, action in self._actions.items():
@@ -293,6 +312,25 @@ class MainWindow(QMainWindow):
         self._apply_onboarding_gate()
         self.statusBar().showMessage("You're all set. AutoApply is ready.", 5000)
         self._goto(self._queue)
+
+    @Slot(object)
+    @safe_slot
+    def _on_batch_apply_finished(self, tally) -> None:
+        # A batch may have parked jobs as 'held' (refresh the Waiting-on-you list)
+        # and may have hit the Pro-only tailoring gate (surface the upgrade).
+        self._held_screen.refresh()
+        per_job = getattr(tally, "per_job", None) or []
+        if any(getattr(r, "exception_type", None) == "NeedsProError" for r in per_job):
+            self.statusBar().showMessage(
+                "Per-job tailoring is a Pro feature. Here's how to upgrade.", 8000
+            )
+            self._goto(self._billing)
+
+    @Slot(int)
+    def _on_held_count_changed(self, count: int) -> None:
+        action = getattr(self, "_actions", {}).get(self._held_screen)
+        if action is not None:
+            action.setText(f"Waiting on you ({count})" if count else "Waiting on you")
 
     # Also bump the worker's threshold when Settings changes.
     @Slot(int)
