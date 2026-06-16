@@ -27,6 +27,8 @@ from PySide6.QtWidgets import (
 from ..engine.worker import EngineWorker
 from ..safe_ui import get_bus, safe_slot, show_error_dialog
 from .batch_screen import BatchScreen
+from ..auth.manager import AuthManager
+from .async_task import AsyncTaskRunner
 from .profile_screen import ProfileScreen
 from .queue_screen import QueueScreen
 from .results_screen import ResultsScreen
@@ -67,9 +69,14 @@ class MainWindow(QMainWindow):
             match_threshold=self._settings.match_threshold,
         )
 
+        # Auth + a shared off-UI-thread runner for blocking calls (sign-in,
+        # profile/criteria save, entitlement, checkout). Stopped in closeEvent.
+        self._auth = AuthManager()
+        self._runner = AsyncTaskRunner()
+
         # Screens.
         self._stack = QStackedWidget(self)
-        self._signin = SignInScreen()
+        self._signin = SignInScreen(auth_manager=self._auth, runner=self._runner)
         self._session = SessionSetupScreen(
             engine_workdir=engine_workdir, worker=self._worker
         )
@@ -96,8 +103,8 @@ class MainWindow(QMainWindow):
         # Scrape-and-apply: the moment auto-apply kicks off, swap to the
         # Batch screen so the user can see live progress and reach STOP.
         self._queue.auto_apply_started.connect(self._on_auto_apply_started)
-        # Sign-in is a stub; the Skip button emits `authenticated` and we
-        # respond by routing to the Seek session screen, the natural next step.
+        # On a successful sign-in the screen emits `authenticated(user_id)`; we
+        # route to the next onboarding step.
         self._signin.authenticated.connect(self._on_signin_authenticated)
         for screen in [
             self._signin,
@@ -252,4 +259,5 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt naming)
         self._worker.stop_loop()
+        self._runner.stop()
         super().closeEvent(event)

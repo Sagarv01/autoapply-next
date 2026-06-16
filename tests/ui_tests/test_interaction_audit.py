@@ -39,7 +39,6 @@ from autoapply_next.ui.run_screen import RunScreen
 from autoapply_next.ui.session_setup_screen import SessionSetupScreen
 from autoapply_next.ui.settings_screen import SettingsScreen
 from autoapply_next.ui.settings_store import SettingsStore
-from autoapply_next.ui.signin_screen import SignInScreen
 
 
 # ---------------------------------------------------------------------- fixtures
@@ -123,39 +122,8 @@ def _close_all_messageboxes() -> None:
             w.close()
 
 
-# ---------------------------------------------------------------------- SignIn
-
-
-def test_signin_skip_button_emits_authenticated(qtbot):
-    screen = SignInScreen()
-    qtbot.addWidget(screen)
-    received: list[str] = []
-    screen.authenticated.connect(received.append)
-
-    # Find the "Skip (dev mode)" QPushButton among the screen's children.
-    skip_btns = [
-        b for b in screen.findChildren(QPushButton)
-        if "Skip" in b.text()
-    ]
-    assert skip_btns, "Skip button not found"
-    skip_btns[0].click()
-    qtbot.wait(20)
-    assert received == ["dev-user"]
-
-
-def test_signin_disabled_controls_have_tooltips(qtbot):
-    screen = SignInScreen()
-    qtbot.addWidget(screen)
-    for btn in screen.findChildren(QPushButton):
-        if btn.text() == "Sign in":
-            assert not btn.isEnabled()
-            assert btn.toolTip(), "disabled Sign in button must explain itself"
-    # The two QLineEdits should also have tooltips.
-    from PySide6.QtWidgets import QLineEdit
-
-    for le in screen.findChildren(QLineEdit):
-        assert not le.isEnabled()
-        assert le.toolTip(), "disabled line edits must have tooltips"
+# SignIn is now a real email/password screen with background auth; its behavior
+# (success -> authenticated, error states, validation) lives in test_signin_screen.py.
 
 
 # -------------------------------------------------------------------- Settings
