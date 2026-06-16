@@ -160,40 +160,25 @@ def _safe_json(resp: httpx.Response) -> Any:
         return None
 
 
-async def proxy_complete(
-    *,
-    system: str,
-    user: str,
-    model: str | None = None,
-    task: str | None = None,
-    timeout: float = 180.0,
-) -> str:
-    """Route one completion through the proxy and return the reply text.
-
-    Same call shape as the vendored `claude_complete` (plus an optional `task`
-    hint), so it can stand in for it via monkey-patch. `task="tailor"` flags
-    per-job document tailoring, which the proxy gates to the Pro tier. Raises a
-    typed ProxyError subclass on failure.
-    """
+def _auth_headers() -> dict:
+    """Standard authenticated proxy headers. Raises AuthExpiredError if no token
+    is available (not signed in)."""
     token = _get_access_token()
     if not token:
         raise AuthExpiredError("No access token; sign in to continue.", status=401)
-
-    url = f"{_proxy_base_url()}/api/llm/complete"
-    headers = {
+    return {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "X-Client-Version": _client_version(),
     }
-    payload = {"system": system, "user": user, "model": model or DEFAULT_MODEL}
-    if task:
-        payload["task"] = task
 
-    try:
-        resp = await _http_post(url, headers, payload, timeout)
-    except httpx.RequestError as e:
-        raise ProxyUnavailableError(f"Proxy unavailable: {e}", status=503) from e
 
+def _raise_for_proxy_status(resp: httpx.Response) -> None:
+    """Map a proxy HTTP error status to a typed ProxyError. No-op on success.
+
+    Shared by every proxy call (completion + billing) so failure handling
+    (TASKS 2.2) branches on the same types everywhere.
+    """
     sc = resp.status_code
     if sc == 401:
         raise AuthExpiredError("Session expired", status=401, detail=_safe_json(resp))
@@ -210,4 +195,32 @@ async def proxy_complete(
     if sc >= 400:
         raise ProxyError(f"Proxy error {sc}", status=sc, detail=_safe_json(resp))
 
+
+async def proxy_complete(
+    *,
+    system: str,
+    user: str,
+    model: str | None = None,
+    task: str | None = None,
+    timeout: float = 180.0,
+) -> str:
+    """Route one completion through the proxy and return the reply text.
+
+    Same call shape as the vendored `claude_complete` (plus an optional `task`
+    hint), so it can stand in for it via monkey-patch. `task="tailor"` flags
+    per-job document tailoring, which the proxy gates to the Pro tier. Raises a
+    typed ProxyError subclass on failure.
+    """
+    headers = _auth_headers()
+    url = f"{_proxy_base_url()}/api/llm/complete"
+    payload = {"system": system, "user": user, "model": model or DEFAULT_MODEL}
+    if task:
+        payload["task"] = task
+
+    try:
+        resp = await _http_post(url, headers, payload, timeout)
+    except httpx.RequestError as e:
+        raise ProxyUnavailableError(f"Proxy unavailable: {e}", status=503) from e
+
+    _raise_for_proxy_status(resp)
     return str((resp.json() or {}).get("text", ""))
