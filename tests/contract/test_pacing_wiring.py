@@ -52,6 +52,31 @@ def test_live_run_takes_gap_from_time_of_day_pacing(monkeypatch, tmp_path):
     assert len(seen) == 1
 
 
+def test_run_batch_signals_cooldown_before_each_throttle(monkeypatch, tmp_path):
+    from autoapply_next.engine.results import ApplicationResult, ApplicationStatus
+
+    _install_fake_peek_session(monkeypatch)
+    _stub_apply_to_job(
+        monkeypatch,
+        [ApplicationResult(job_url=u, status=ApplicationStatus.SUBMITTED) for u in ("u1", "u2")],
+    )
+    _noop_throttle(monkeypatch)
+
+    cooldowns: list = []
+    asyncio.run(
+        run_batch(
+            job_urls=["u1", "u2"],
+            engine_workdir=tmp_path,
+            allow_real_submit=True,
+            throttle_range_seconds=(0, 0),
+            on_cooldown=cooldowns.append,
+        )
+    )
+    # one gap between the two submits, and it is reported (>= the 60s floor)
+    assert len(cooldowns) == 1
+    assert cooldowns[0] >= 60.0
+
+
 def test_dry_run_does_not_consult_pacing(monkeypatch, tmp_path):
     _install_fake_peek_session(monkeypatch)
     _stub_apply_to_job(monkeypatch, [_dry_run("u1"), _dry_run("u2")])

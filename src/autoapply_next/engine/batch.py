@@ -452,6 +452,7 @@ async def run_batch(
     max_consecutive_failures: int = 3,
     daily_cap: int = 0,
     today_count_fn: TodayCountFn | None = None,
+    on_cooldown: Callable[[float], None] | None = None,
 ) -> BatchRunResult:
     """Iterate `job_urls`, calling `apply_to_job` for each. Throttle, stop
     gracefully, never auto-retry.
@@ -665,6 +666,13 @@ async def run_batch(
             # time of day (never below the 60s floor); dry-run uses the band.
             if i < total:
                 gap = _submit_gap(allow_real_submit, effective_throttle)
+                # Tell the UI we're deliberately pacing, so a 60-180s gap shows
+                # reassuring cooldown copy instead of looking frozen.
+                if on_cooldown is not None:
+                    try:
+                        on_cooldown(gap)
+                    except Exception:  # noqa: BLE001 - a UI hiccup must not stop the run
+                        logger.warning("on_cooldown callback raised", exc_info=True)
                 await _async_throttle(gap, is_stopped, is_cancelled)
 
         tally.consecutive_failures = consecutive_failures

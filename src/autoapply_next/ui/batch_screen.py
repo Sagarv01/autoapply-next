@@ -40,6 +40,8 @@ from ..engine.batch import BatchRunResult
 from ..engine.results import ApplicationResult, ApplicationStatus
 from ..engine.worker import EngineWorker
 from ..safe_ui import safe_slot, show_error_dialog
+from .run_status import RunState
+from .run_status_widget import RunStatusWidget
 from .settings_store import SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -78,6 +80,9 @@ class BatchScreen(QWidget):
         layout.addWidget(title)
 
         layout.addWidget(self._build_status_bar())
+        # Plain-language run status + reassuring cooldown copy during pacing waits.
+        self._run_status = RunStatusWidget()
+        layout.addWidget(self._run_status)
         layout.addWidget(self._build_table_block(), stretch=1)
         layout.addWidget(self._build_tally())
 
@@ -89,6 +94,7 @@ class BatchScreen(QWidget):
         self._worker.batch_apply_progress.connect(self._on_run_progress)
         self._worker.batch_apply_finished.connect(self._on_run_finished)
         self._worker.scrape_finished.connect(self._on_scrape_finished)
+        self._worker.cooldown_started.connect(self._run_status.start_cooldown)
         self._worker.log.connect(self._on_log)
         self._settings.allow_real_submit_changed.connect(self._refresh_mode_label)
         self._settings.match_threshold_changed.connect(self._refresh_threshold_label)
@@ -296,6 +302,9 @@ class BatchScreen(QWidget):
             self._results[row_idx] = result
         self._render_row(row_idx, result)
         self._status_label.setText(self._running_status(done, total, result))
+        # A fresh result means we're actively applying (this also ends any
+        # cooldown rotation between jobs).
+        self._run_status.set_state(RunState.APPLYING, done=done, total=total)
 
     def _running_status(
         self, done: int, total: int, result: ApplicationResult
@@ -329,6 +338,15 @@ class BatchScreen(QWidget):
             readout += f"\nFatal: {tally.fatal_reason}"
         self._tally_label.setText(readout)
         self._status_label.setText(f"Batch {tally.stop_reason}.")
+        if tally.fatal_reason:
+            final = RunState.ERROR
+        else:
+            final = {
+                "daily_cap_reached": RunState.DAILY_LIMIT,
+                "user_stop": RunState.STOPPED,
+                "cancelled": RunState.STOPPED,
+            }.get(tally.stop_reason, RunState.IDLE)
+        self._run_status.set_state(final)
 
     @Slot(str, str)
     @safe_slot

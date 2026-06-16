@@ -114,6 +114,7 @@ class EngineWorker(QObject):
     batch_prepare_finished = Signal(object)
     batch_apply_progress = Signal(int, int, object)
     batch_apply_finished = Signal(object)
+    cooldown_started = Signal(float)  # the engine is pacing for N seconds
 
     def __init__(self, *, engine_workdir: Path, match_threshold: int = 50):
         super().__init__()
@@ -342,6 +343,13 @@ class EngineWorker(QObject):
             return False
         return True
 
+    def _emit_cooldown(self, seconds: float) -> None:
+        # Called from the engine loop thread; emitting a Qt signal is thread-safe
+        # (queued to the GUI thread). Only surface a real pacing gap, not the
+        # near-zero dry-run gap.
+        if seconds >= 2:
+            self.cooldown_started.emit(float(seconds))
+
     def _begin(self, label: str) -> None:
         self._current_label = label
         self._cancel_event.clear()
@@ -531,6 +539,7 @@ class EngineWorker(QObject):
                     throttle_range_seconds=throttle_range,
                     tally=tally,
                     **daily_cap_kwargs(self._engine_workdir, allow_real_submit),
+                    on_cooldown=self._emit_cooldown,
                 )
                 self.batch_apply_finished.emit(tally)
             except asyncio.CancelledError:
@@ -641,6 +650,7 @@ class EngineWorker(QObject):
                         fatal_classifier=is_fatal_condition,
                         max_consecutive_failures=3,
                         **daily_cap_kwargs(self._engine_workdir, allow_real_submit, daily_cap),
+                        on_cooldown=self._emit_cooldown,
                     )
                     applies_this_run = len(tally.per_job)
                     logger.info(
@@ -759,6 +769,7 @@ class EngineWorker(QObject):
                     fatal_classifier=is_fatal_condition,
                     max_consecutive_failures=3,
                     **daily_cap_kwargs(self._engine_workdir, allow_real_submit, daily_cap),
+                    on_cooldown=self._emit_cooldown,
                 )
                 logger.info(
                     "Phase 2 complete: total %d per_job entries, "

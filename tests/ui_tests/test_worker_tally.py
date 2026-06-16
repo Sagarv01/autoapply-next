@@ -55,6 +55,7 @@ def test_run_batch_emits_real_tally_on_success(qtbot, workdir, monkeypatch):
         is_stopped,
         throttle_range_seconds,
         tally,
+        on_cooldown=None,
     ):
         # Confirm the worker passed Contract 5 kwargs.
         assert tally is not None and isinstance(tally, BatchRunResult)
@@ -120,6 +121,7 @@ def test_run_batch_emits_real_tally_on_cancel(qtbot, workdir, monkeypatch):
         is_stopped,
         throttle_range_seconds,
         tally,
+        on_cooldown=None,
     ):
         captured_tally.append(tally)
         # Append one per-job entry (truth before the cancel), then sleep so
