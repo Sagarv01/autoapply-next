@@ -227,6 +227,23 @@ is built.)
 - [ ] If a step is missing (e.g. delete the resume file), relaunch -> the wizard
   reopens at exactly that step and the bot stays locked.
 
+### Paywall / upgrade screen (BillingScreen)
+NOTE: built + unit-tested but NOT yet added to MainWindow's stack/toolbar; wire it
+in (add to the stack + a toolbar entry, and/or open it on a 403 needs_pro from the
+proxy) before this checklist applies.
+- [ ] Open the screen on a Free account -> "You're on the Free plan. N
+  applications left." with an "Upgrade to Pro" button; the window does not freeze
+  while the plan loads.
+- [ ] Click "Upgrade to Pro" -> a Stripe checkout opens in the system browser
+  (test mode), the app stays responsive (it is waiting on the loopback, not
+  frozen).
+- [ ] Complete the test checkout (card 4242...) -> the browser returns to the
+  127.0.0.1 page, and within a few seconds the screen flips to "You're on the Pro
+  plan." (after the webhook flips the tier). If it lags, it shows "we're
+  confirming your upgrade".
+- [ ] Cancel the checkout -> "No changes made. You can upgrade whenever..." and
+  the Upgrade button is still available.
+
 ## What is NOT done (and why)
 
 - **L3 fixture replay** (record a real apply, replay the submit against a local
