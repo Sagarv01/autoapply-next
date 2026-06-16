@@ -39,7 +39,7 @@ def _reset_providers():
 async def test_401_refreshes_and_retries_once_then_succeeds(monkeypatch):
     calls = {"complete": 0, "refresh": 0}
 
-    async def _fake_complete(*, system, user, model=None, timeout=180.0):
+    async def _fake_complete(*, system, user, model=None, task=None, timeout=180.0):
         calls["complete"] += 1
         if calls["complete"] == 1:
             raise llm_proxy.AuthExpiredError("expired", status=401)
@@ -60,7 +60,7 @@ async def test_401_refreshes_and_retries_once_then_succeeds(monkeypatch):
 async def test_401_without_refresher_propagates_no_retry(monkeypatch):
     calls = {"complete": 0}
 
-    async def _fake_complete(*, system, user, model=None, timeout=180.0):
+    async def _fake_complete(*, system, user, model=None, task=None, timeout=180.0):
         calls["complete"] += 1
         raise llm_proxy.AuthExpiredError("expired", status=401)
 
@@ -75,7 +75,7 @@ async def test_401_without_refresher_propagates_no_retry(monkeypatch):
 async def test_401_still_failing_after_refresh_propagates_once(monkeypatch):
     calls = {"complete": 0, "refresh": 0}
 
-    async def _fake_complete(*, system, user, model=None, timeout=180.0):
+    async def _fake_complete(*, system, user, model=None, task=None, timeout=180.0):
         calls["complete"] += 1
         raise llm_proxy.AuthExpiredError("expired", status=401)
 

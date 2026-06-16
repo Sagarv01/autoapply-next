@@ -42,6 +42,11 @@ class SubscriptionExpiredError(ProxyError):
     """HTTP 402: the user's subscription is inactive."""
 
 
+class NeedsProError(ProxyError):
+    """HTTP 403 needs_pro: per-job tailoring requires the Pro tier. The current
+    plan (free/basic) may apply with base documents but cannot tailor."""
+
+
 class ClientTooOldError(ProxyError):
     """HTTP 426: the client is below the proxy's minimum version floor."""
 
@@ -156,12 +161,19 @@ def _safe_json(resp: httpx.Response) -> Any:
 
 
 async def proxy_complete(
-    *, system: str, user: str, model: str | None = None, timeout: float = 180.0
+    *,
+    system: str,
+    user: str,
+    model: str | None = None,
+    task: str | None = None,
+    timeout: float = 180.0,
 ) -> str:
     """Route one completion through the proxy and return the reply text.
 
-    Same call shape as the vendored `claude_complete`, so it can stand in for it
-    via monkey-patch. Raises a typed ProxyError subclass on failure.
+    Same call shape as the vendored `claude_complete` (plus an optional `task`
+    hint), so it can stand in for it via monkey-patch. `task="tailor"` flags
+    per-job document tailoring, which the proxy gates to the Pro tier. Raises a
+    typed ProxyError subclass on failure.
     """
     token = _get_access_token()
     if not token:
@@ -174,6 +186,8 @@ async def proxy_complete(
         "X-Client-Version": _client_version(),
     }
     payload = {"system": system, "user": user, "model": model or DEFAULT_MODEL}
+    if task:
+        payload["task"] = task
 
     try:
         resp = await _http_post(url, headers, payload, timeout)
@@ -185,6 +199,8 @@ async def proxy_complete(
         raise AuthExpiredError("Session expired", status=401, detail=_safe_json(resp))
     if sc == 402:
         raise SubscriptionExpiredError("Subscription inactive", status=402, detail=_safe_json(resp))
+    if sc == 403:
+        raise NeedsProError("Per-job tailoring requires Pro", status=403, detail=_safe_json(resp))
     if sc == 426:
         raise ClientTooOldError("Client too old; update required", status=426, detail=_safe_json(resp))
     if sc == 429:

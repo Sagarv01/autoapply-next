@@ -24,25 +24,49 @@ logger = logging.getLogger(__name__)
 # excluded on purpose (out of scope).
 _TARGET_MODULES = ("matcher", "tailorer", "seek_apply")
 
+# Modules whose LLM work is per-job document tailoring (Pro-gated server-side).
+# Only `tailorer` produces the tailored resume/cover; `matcher` (scoring) and
+# `seek_apply` (screening answers) are generic completions open to every tier.
+_TASK_BY_MODULE = {"tailorer": "tailor"}
 
-async def _proxy_claude_complete(
-    *, system: str, user: str, model: str | None = None, timeout: float = 180.0
-) -> str:
-    """Drop-in replacement for `claude_cli.claude_complete` that routes through
-    the proxy. Signature-compatible with every engine call site.
+
+def _make_proxy_claude_complete(task: str | None):
+    """Build a drop-in `claude_cli.claude_complete` replacement bound to a proxy
+    task hint. Signature-compatible with every engine call site (the engine never
+    passes `task`; it is injected per-module here).
 
     Implements the 401 refresh-and-retry-once policy (TASKS 2.2): on an expired
     session, refresh the access token once and retry exactly one more time. A
     persistent 401 (or no refresher configured) propagates as AuthExpiredError,
     which is fatal-for-batch (see persistence.is_fatal_condition).
     """
-    try:
-        return await llm_proxy.proxy_complete(system=system, user=user, model=model, timeout=timeout)
-    except llm_proxy.AuthExpiredError:
-        refreshed = await llm_proxy.refresh_access_token()
-        if not refreshed:
-            raise
-        return await llm_proxy.proxy_complete(system=system, user=user, model=model, timeout=timeout)
+
+    async def _wrapper(
+        *, system: str, user: str, model: str | None = None, timeout: float = 180.0
+    ) -> str:
+        try:
+            return await llm_proxy.proxy_complete(
+                system=system, user=user, model=model, task=task, timeout=timeout
+            )
+        except llm_proxy.AuthExpiredError:
+            refreshed = await llm_proxy.refresh_access_token()
+            if not refreshed:
+                raise
+            return await llm_proxy.proxy_complete(
+                system=system, user=user, model=model, task=task, timeout=timeout
+            )
+
+    return _wrapper
+
+
+# Module-level singletons so the installer can swap by identity and tests can
+# assert which wrapper landed on which module.
+_proxy_claude_complete = _make_proxy_claude_complete(None)
+_proxy_claude_complete_tailor = _make_proxy_claude_complete("tailor")
+
+
+def _wrapper_for_module(name: str):
+    return _proxy_claude_complete_tailor if _TASK_BY_MODULE.get(name) == "tailor" else _proxy_claude_complete
 
 
 class ProxyLLM(AbstractContextManager):
@@ -68,7 +92,7 @@ class ProxyLLM(AbstractContextManager):
                 continue
             if hasattr(mod, "claude_complete"):
                 self._originals[name] = mod.claude_complete  # type: ignore[attr-defined]
-                mod.claude_complete = _proxy_claude_complete  # type: ignore[attr-defined]
+                mod.claude_complete = _wrapper_for_module(name)  # type: ignore[attr-defined]
         self._installed = True
         logger.info("ProxyLLM installed on %s", sorted(self._originals))
 
