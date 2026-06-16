@@ -244,6 +244,24 @@ proxy) before this checklist applies.
 - [ ] Cancel the checkout -> "No changes made. You can upgrade whenever..." and
   the Upgrade button is still available.
 
+### "Waiting on you" held-queue screen
+- [ ] After a run that hit an unanswerable screening question, the toolbar shows
+  "Waiting on you (N)" and the screen lists a question with an answer field (or a
+  dropdown for a multiple-choice question).
+- [ ] Type an answer + Save -> "Saved. N jobs can continue now, and AutoApply
+  will reuse this answer next time." and the next question (or "all caught up").
+- [ ] Run again -> the same question is NOT asked again (the answer was
+  remembered), and the previously-held jobs are re-attempted.
+
+### Run status + cooldown copy (batch view)
+- [ ] During a live run, the batch view shows a plain status line ("Applying to
+  jobs for you (3 of 12).").
+- [ ] Between submissions (the 60-180s pacing wait) it shows a reassuring
+  cooldown line ("Taking a short pause between applications...") that changes
+  every few seconds, so the app never looks frozen.
+- [ ] When today's 100-application cap is reached, it says "That's all of today's
+  applications done. AutoApply will start again tomorrow."
+
 ## What is NOT done (and why)
 
 - **L3 fixture replay** (record a real apply, replay the submit against a local
