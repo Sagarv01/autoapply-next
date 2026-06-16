@@ -15,22 +15,26 @@ from typing import Any
 
 import httpx
 
-# The AutoApply Supabase project. URL + anon key are public (the anon key is a
-# publishable key, safe to embed); overridable via env for staging/self-host.
+# The AutoApply Supabase project. The publishable key is safe to embed (it is the
+# client-facing key, like the old anon key). The legacy anon JWT is being
+# deprecated by Supabase, so we ship the modern opaque sb_publishable_ key.
+# Overridable via env for staging/self-host.
 _DEFAULT_SUPABASE_URL = "https://ndkeryoqlvktzuzxubvb.supabase.co"
-_DEFAULT_ANON_KEY = (
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
-    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5ka2VyeW9xbHZrdHp1enh1YnZiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYxNjI0MTgsImV4cCI6MjA5MTczODQxOH0."
-    "aknkqtGQjQHK8-ARZWE0WLHrl2AKAD7y8nind37J9-o"
-)
+_DEFAULT_PUBLISHABLE_KEY = "sb_publishable_de9WAIQZ9jYJOuWZSFGHrw_GydeitzH"
 
 
 def _supabase_url() -> str:
     return (os.environ.get("AUTOAPPLY_SUPABASE_URL") or _DEFAULT_SUPABASE_URL).rstrip("/")
 
 
-def _anon_key() -> str:
-    return os.environ.get("AUTOAPPLY_SUPABASE_ANON_KEY") or _DEFAULT_ANON_KEY
+def _publishable_key() -> str:
+    """The GoTrue apikey: the modern publishable key, with the legacy anon env
+    honored during the transition."""
+    return (
+        os.environ.get("AUTOAPPLY_SUPABASE_PUBLISHABLE_KEY")
+        or os.environ.get("AUTOAPPLY_SUPABASE_ANON_KEY")
+        or _DEFAULT_PUBLISHABLE_KEY
+    )
 
 
 class AuthError(RuntimeError):
@@ -52,9 +56,9 @@ class Session:
 
 
 def _http_post(path: str, body: dict, *, timeout: float = 20.0) -> httpx.Response:
-    """POST to GoTrue with the anon apikey. Factored so tests can stub it."""
+    """POST to GoTrue with the publishable apikey. Factored so tests can stub it."""
     url = f"{_supabase_url()}{path}"
-    headers = {"apikey": _anon_key(), "Content-Type": "application/json"}
+    headers = {"apikey": _publishable_key(), "Content-Type": "application/json"}
     try:
         with httpx.Client(timeout=timeout) as client:
             return client.post(url, headers=headers, json=body)
