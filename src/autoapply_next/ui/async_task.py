@@ -86,11 +86,31 @@ class AsyncTaskRunner(QObject):
 
     # ------------------------------------------------------------- stop
     def stop(self) -> None:
-        """Stop the loop and join the thread. Idempotent."""
+        """Cancel any in-flight tasks, stop the loop, and join the thread.
+        Idempotent and SHUTDOWN-ONLY: call once when the app is closing
+        (MainWindow.closeEvent); do not submit afterwards."""
         if self._stopped:
             return
         self._stopped = True
         loop = self._loop
         if loop is not None and loop.is_running():
+            # Drain in-flight tasks first so none is GC'd while pending (which
+            # would emit a noisy "Task was destroyed but it is pending" warning).
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._drain(), loop)
+                fut.result(timeout=2)
+            except Exception:  # noqa: BLE001 - shutdown best-effort
+                pass
             loop.call_soon_threadsafe(loop.stop)
         self._thread.join(timeout=5)
+
+    async def _drain(self) -> None:
+        me = asyncio.current_task()
+        others = [t for t in asyncio.all_tasks() if t is not me]
+        for t in others:
+            t.cancel()
+        for t in others:
+            try:
+                await t
+            except BaseException:  # noqa: BLE001 - includes CancelledError
+                pass

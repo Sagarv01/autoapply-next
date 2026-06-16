@@ -87,6 +87,23 @@ def test_main_window_boots_on_empty_workdir(qtbot, fresh_workdir):
     _close_all_messageboxes()
 
 
+def test_failed_session_restore_is_handled_and_gate_stays_consistent(qtbot, fresh_workdir):
+    """A non-AuthError during the off-thread session restore must not leave an
+    unhandled failed-signal; the gate is re-applied (and stays locked since the
+    user is not signed in). An unrelated screen token must be ignored."""
+    from autoapply_next.ui.main_window import MainWindow
+
+    win = MainWindow(engine_workdir=fresh_workdir)
+    qtbot.addWidget(win)
+    # Simulate a failed restore (e.g. keychain or transient refresh error).
+    win._on_runner_failed("RuntimeError: keychain boom", "auth_restore")
+    # Bot stays locked on a fresh, signed-out workdir; no crash.
+    assert not win._actions[win._queue].isEnabled()
+    # A different screen's failure token is ignored here (the screen handles it).
+    win._on_runner_failed("whatever", "profile_save")
+    win.close()
+
+
 def test_run_screen_empty_workdir_validates(qtbot, fresh_workdir):
     """Clicking Run with no URL and no engine on a tester's first launch must
     open a dialog, not just sit there."""

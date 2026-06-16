@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
         # set up). Then silently try to restore a stored session OFF the GUI
         # thread; if it restores, re-apply the gate.
         self._runner.succeeded.connect(self._on_runner_succeeded)
+        self._runner.failed.connect(self._on_runner_failed)
         self._apply_onboarding_gate()
         self._runner.submit(self._auth.restore, token="auth_restore")
 
@@ -274,6 +275,16 @@ class MainWindow(QMainWindow):
     @Slot(object, object)
     def _on_runner_succeeded(self, result, token) -> None:
         if token == "auth_restore":
+            self._apply_onboarding_gate()
+
+    @Slot(str, object)
+    def _on_runner_failed(self, message, token) -> None:
+        # Only the restore is owned by MainWindow; screen tokens are handled by
+        # their own screens. A failed restore (keychain / transient refresh
+        # error) leaves the user signed-out: re-apply the gate so it stays
+        # consistent with the success path (it stays locked, which is correct).
+        if token == "auth_restore":
+            logger.info("session restore failed (%s); staying signed out", message)
             self._apply_onboarding_gate()
 
     @Slot()
