@@ -201,6 +201,32 @@ is built.)
   config.yaml's candidate block).
 - [ ] Salary accepts "130000" or "130,000" and is stored as a number.
 
+### Documents screen
+- [ ] "Choose resume..." opens a file picker; pick a .docx -> "Resume added."
+  appears and the window does not freeze during the copy.
+- [ ] The cover letter is clearly optional (you can continue without it).
+- [ ] Re-open the screen -> it still says the resume is added (copied to
+  assets/<base resume filename> where the engine reads it).
+
+### Criteria screen
+- [ ] Enter keywords (comma-separated) + a location, Save -> no freeze, advances.
+- [ ] Leaving either blank shows "Please add at least one keyword and a location."
+- [ ] Re-open -> your keywords + location are still there.
+
+### Acknowledge screen
+- [ ] The honesty line is shown with a checkbox; "Continue" is disabled until
+  you tick it.
+- [ ] Tick + Continue -> no freeze, onboarding completes.
+
+### Onboarding gate (end-to-end)
+- [ ] On a FRESH workdir, launch -> you land on the wizard at Sign in; the
+  toolbar's Queue / Run / Batch / Results actions are DISABLED (greyed).
+- [ ] Complete all steps -> the apply screens unlock and you land on Queue.
+- [ ] Quit and relaunch with the same workdir + a stored session -> after the
+  silent restore you are NOT sent back through onboarding; the bot is unlocked.
+- [ ] If a step is missing (e.g. delete the resume file), relaunch -> the wizard
+  reopens at exactly that step and the bot stays locked.
+
 ## What is NOT done (and why)
 
 - **L3 fixture replay** (record a real apply, replay the submit against a local
