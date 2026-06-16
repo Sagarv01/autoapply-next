@@ -54,7 +54,7 @@ Free/Basic/Pro reconciliation + Resend + PostHog). STOP for Stripe Price IDs.
   - [x] M-E.2 client: llm_proxy task="tailor" + NeedsProError; ProxyLLM per-module wrapper (only tailorer tailors). commit 7c6e019.
   - [x] M-E.3 proxy checkout honors loopback success/cancel URLs (localhost-only). commit 9b08918.
   - [x] M-E.4 client billing/ pkg: LoopbackReturnServer + proxy_billing + checkout_flow.run_checkout (start→create→open→wait→poll tier flip; always stops). commit 597b248.
-  - [B] M-E.5 real Stripe TEST products/prices + live checkout/webhook E2E. **BLOCKED: Stripe MCP is LIVE-mode (acct Quantumloop ai); live catalog has dup "Starter"/"Pro" products. Need a TEST-mode key.** Resend + PostHog still absent. Qt upgrade UI pairs w/ UI batch.
+  - [x] M-E.5 real Stripe TEST products/prices + money-path E2E **DONE 2026-06-16** (test key provided; drove Stripe test API directly since MCP is live). Created Basic+Pro products+prices (livemode=false; IDs in proxy-server/STRIPE_TEST_IDS.md). Proven green: real checkout session vs Pro price w/ loopback URLs; real webhook handler (HMAC sig-verified) maps real Pro price→tier=pro; real Supabase row flipped Free→Pro then restored; real gate blocks Free (403 needs_pro) + unlocks Pro. Only stub: stripe.Subscription.retrieve. Remaining: Resend + PostHog absent; Qt upgrade UI pairs w/ UI batch; deployed-proxy webhook delivery needs SUPABASE_SERVICE_ROLE_KEY.
 - [ ] M-F Packaging mac+win (PyInstaller) + in-app version check + signing. STOP: Apple + Windows EV certs.
 
 Branch: `production-sprint` (off `user-ready-sprint`). Do not merge to main.
