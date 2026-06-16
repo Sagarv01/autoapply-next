@@ -106,6 +106,22 @@ async def test_proxy_complete_defaults_model_to_sonnet(monkeypatch, _token):
     assert captured["model"] == llm_proxy.DEFAULT_MODEL
 
 
+async def test_fetch_min_client_version(monkeypatch):
+    async def _fake_get(url, timeout):
+        return _FakeResp(200, {"min_client_version": "1.5.0", "submissions_enabled": True})
+
+    monkeypatch.setattr(llm_proxy, "_http_get", _fake_get)
+    assert await llm_proxy.fetch_min_client_version() == "1.5.0"
+
+
+async def test_fetch_min_client_version_fails_open(monkeypatch):
+    async def _fake_get(url, timeout):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(llm_proxy, "_http_get", _fake_get)
+    assert await llm_proxy.fetch_min_client_version() == "0.0.0"
+
+
 async def test_proxy_complete_without_token_raises_auth():
     llm_proxy.set_access_token_provider(None)
     with pytest.raises(llm_proxy.AuthExpiredError):

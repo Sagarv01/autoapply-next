@@ -153,6 +153,21 @@ async def submissions_enabled(timeout: float = 10.0) -> bool:
     return bool(data.get("submissions_enabled", True))
 
 
+async def fetch_min_client_version(timeout: float = 10.0) -> str:
+    """Read the proxy's published minimum client version (/api/config). Returns
+    '0.0.0' (which never forces an update) if it can't be fetched, so a config
+    blip never locks a user out."""
+    url = f"{_proxy_base_url()}/api/config"
+    try:
+        resp = await _http_get(url, timeout)
+        if resp.status_code >= 400:
+            return "0.0.0"
+        data = resp.json() or {}
+    except Exception:
+        return "0.0.0"
+    return str(data.get("min_client_version") or "0.0.0")
+
+
 def _safe_json(resp: httpx.Response) -> Any:
     try:
         return resp.json()

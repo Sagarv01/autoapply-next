@@ -28,12 +28,15 @@ from ..engine.worker import EngineWorker
 from ..safe_ui import get_bus, safe_slot, show_error_dialog
 from .batch_screen import BatchScreen
 from ..auth.manager import AuthManager
+from ..engine.llm_proxy import _client_version, fetch_min_client_version
 from ..onboarding import state as ob
+from ..version_check import is_update_required
 from .async_task import AsyncTaskRunner
 from .billing_screen import BillingScreen
 from .held_queue_screen import HeldQueueScreen
 from .onboarding_wizard import OnboardingWizard
 from .profile_screen import ProfileScreen
+from .update_required_screen import UpdateRequiredScreen
 from .queue_screen import QueueScreen
 from .results_screen import ResultsScreen
 from .run_screen import RunScreen
@@ -107,6 +110,7 @@ class MainWindow(QMainWindow):
             engine_workdir=engine_workdir, runner=self._runner
         )
         self._billing = BillingScreen(runner=self._runner)
+        self._update_screen = UpdateRequiredScreen()  # shown only if below floor
         self._settings_screen = SettingsScreen(settings=self._settings)
 
         # Wire Queue -> Run handoff: selecting a row swaps to Run with URL preloaded.
@@ -133,6 +137,7 @@ class MainWindow(QMainWindow):
             self._results,
             self._held_screen,
             self._billing,
+            self._update_screen,
             self._settings_screen,
         ]:
             self._stack.addWidget(screen)
@@ -149,6 +154,8 @@ class MainWindow(QMainWindow):
         self._runner.failed.connect(self._on_runner_failed)
         self._apply_onboarding_gate()
         self._runner.submit(self._auth.restore, token="auth_restore")
+        # Check the version floor off-thread; if below it, wall the app.
+        self._runner.submit_coro(fetch_min_client_version(), token="version_check")
 
         # Wire ALLOW_REAL_SUBMIT changes to update the worker / status bar.
         self._settings.allow_real_submit_changed.connect(
@@ -295,6 +302,16 @@ class MainWindow(QMainWindow):
     def _on_runner_succeeded(self, result, token) -> None:
         if token == "auth_restore":
             self._apply_onboarding_gate()
+        elif token == "version_check":
+            if is_update_required(_client_version(), str(result or "0.0.0")):
+                self._show_update_wall()
+
+    def _show_update_wall(self) -> None:
+        """Below the proxy's version floor: the only thing the user can do is
+        download the new build."""
+        self._stack.setCurrentWidget(self._update_screen)
+        for action in getattr(self, "_actions", {}).values():
+            action.setEnabled(False)
 
     @Slot(str, object)
     def _on_runner_failed(self, message, token) -> None:

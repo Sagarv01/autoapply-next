@@ -104,6 +104,21 @@ def test_failed_session_restore_is_handled_and_gate_stays_consistent(qtbot, fres
     win.close()
 
 
+def test_below_version_floor_walls_the_app(qtbot, fresh_workdir, monkeypatch):
+    import autoapply_next.ui.main_window as mw
+    from autoapply_next.ui.main_window import MainWindow
+
+    win = MainWindow(engine_workdir=fresh_workdir)
+    qtbot.addWidget(win)
+    # The running build is 1.0.0; the proxy floor came back as 9.9.9.
+    monkeypatch.setattr(mw, "_client_version", lambda: "1.0.0")
+    win._on_runner_succeeded("9.9.9", "version_check")
+    assert win._stack.currentWidget() is win._update_screen
+    # the wall disables navigation
+    assert not win._actions[win._queue].isEnabled()
+    win.close()
+
+
 def test_run_screen_empty_workdir_validates(qtbot, fresh_workdir):
     """Clicking Run with no URL and no engine on a tester's first launch must
     open a dialog, not just sit there."""
