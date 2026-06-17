@@ -1,17 +1,15 @@
-"""EligibilityAnswerGuard: never select a citizenship/PR option on a work-rights
-dropdown.
+"""EligibilityAnswerGuard: answer a work-rights dropdown truthfully for a 485
+holder, or hold it. Never claim a status or visa type the candidate does not hold.
 
-The real bug is NOT in the LLM. On the AU_Q_6 right-to-work dropdown the engine
-takes its rule-based path (seek_apply._answer_field): it computes the candidate's
-visa label string and hands it to _select_best_option -> _safe_select_option, whose
-fuzzy matcher picked "I'm an Australian citizen" over "I have a temporary visa that
-allows me to work in Australia". Every dropdown selection (rule path AND LLM path)
-funnels through _safe_select_option, so that is the chokepoint to guard.
-
-The guard wraps seek_apply._safe_select_option (no vendor edit). When the live DOM
-options look like an eligibility question (they include a citizen/PR/not-entitled
-option), it forces the truthful safe option (a visa with work rights) and never a
-disqualified one. Other dropdowns (experience, salary, notice) delegate untouched.
+Two false-claim bugs were observed live on the Seek AU_Q_6 right-to-work dropdown,
+both from the engine's rule path (seek_apply._answer_field), never the LLM:
+  1. the fuzzy matcher picked "I'm an Australian citizen", and
+  2. after a first fix, it picked "I have a family/partner visa with no
+     restrictions" (matched "no restrictions") for a 485 temporary-graduate holder.
+Both are false. The guard wraps _answer_field: for an eligibility dropdown it picks
+the option consistent with the candidate's actual visa (485 / temporary visa with
+work rights), never a citizen/PR/other-visa-type option, and HOLDS the question for
+the user when no truthful option exists rather than guessing.
 """
 
 from __future__ import annotations
@@ -19,49 +17,79 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 from autoapply_next.engine.eligibility_guard import (
     EligibilityAnswerGuard,
     is_eligibility_question,
     safe_eligibility_pick,
 )
+from autoapply_next.screening.interceptor import QuestionHeldError
 
-# The real AU_Q_6 "right to work" dropdown, as DOM option dicts.
+VISA = "485 Temporary Graduate Visa"
+
+# The real AU_Q_6 dropdown, as DOM option dicts (incl. the family/partner trap).
 AU_Q_6 = [
     {"text": "I'm an Australian citizen", "value": "c"},
     {"text": "I'm a permanent resident", "value": "pr"},
     {"text": "I'm a New Zealand citizen", "value": "nz"},
+    {"text": "I have a family/partner visa with no restrictions", "value": "fp"},
     {"text": "I have a temporary visa that allows me to work in Australia", "value": "tv"},
     {"text": "I'm not currently entitled to work in Australia", "value": "ne"},
 ]
+AU_Q_6_TEXTS = [o["text"] for o in AU_Q_6]
 
 
-# ---- pure helpers -----------------------------------------------------------
+# ---- safe_eligibility_pick --------------------------------------------------
 
 
-def test_safe_pick_never_claims_citizenship_on_au_q_6():
-    pick = safe_eligibility_pick([o["text"] for o in AU_Q_6])
+def test_picks_temporary_work_visa_not_citizen_or_family():
+    pick = safe_eligibility_pick(AU_Q_6_TEXTS, VISA)
     assert pick == "I have a temporary visa that allows me to work in Australia"
 
 
-def test_safe_pick_excludes_pr_nz_and_not_entitled():
-    pick = safe_eligibility_pick([o["text"] for o in AU_Q_6]).lower()
-    assert "permanent resident" not in pick
-    assert "new zealand" not in pick
-    assert "not currently entitled" not in pick
+def test_never_picks_family_partner_even_with_no_restrictions():
+    pick = safe_eligibility_pick(AU_Q_6_TEXTS, VISA)
+    assert "family" not in pick.lower() and "partner" not in pick.lower()
 
 
-def test_safe_pick_none_when_all_disqualified():
-    assert (
-        safe_eligibility_pick(
-            ["I'm an Australian citizen", "I'm a permanent resident", "I require sponsorship"]
-        )
-        is None
-    )
+def test_prefers_explicit_485_or_graduate_option():
+    opts = [
+        "I'm an Australian citizen",
+        "Subclass 485 (Temporary Graduate)",
+        "I have a temporary visa that allows me to work in Australia",
+    ]
+    assert "485" in safe_eligibility_pick(opts, VISA)
 
 
-def test_safe_pick_none_on_empty():
-    assert safe_eligibility_pick([]) is None
-    assert safe_eligibility_pick(None) is None
+def test_picks_other_when_no_temporary_visa_option():
+    opts = ["I'm an Australian citizen", "I'm a permanent resident", "Other"]
+    assert safe_eligibility_pick(opts, VISA) == "Other"
+
+
+def test_none_when_only_disqualified_or_wrong_visa_types():
+    opts = [
+        "I'm an Australian citizen",
+        "I'm a permanent resident",
+        "I have a family/partner visa with no restrictions",
+        "I have a student visa",
+        "I'm on a working holiday visa",
+    ]
+    assert safe_eligibility_pick(opts, VISA) is None
+
+
+def test_none_on_empty():
+    assert safe_eligibility_pick([], VISA) is None
+    assert safe_eligibility_pick(None, VISA) is None
+
+
+def test_rejects_restricted_temporary_visa_option():
+    # A temporary visa WITH work restrictions is false for a full-work-rights 485.
+    opts = [
+        "I'm an Australian citizen",
+        "I have a temporary visa that has work restrictions",
+    ]
+    assert safe_eligibility_pick(opts, VISA) is None
 
 
 def test_is_eligibility_question_matches_and_ignores():
@@ -70,93 +98,90 @@ def test_is_eligibility_question_matches_and_ignores():
     assert not is_eligibility_question("How many years of Python experience?")
 
 
-# ---- the _safe_select_option guard ------------------------------------------
+# ---- the _answer_field guard ------------------------------------------------
 
 
-def _fake_seek_apply(real_options, calls):
-    """A fake seek_apply exposing the two functions the guard touches."""
+def _fake_seek_apply(answer_field_calls, select_calls, visa=VISA):
     m = types.ModuleType("seek_apply")
+    m.CAND_VISA_LABEL = visa  # type: ignore[attr-defined]
 
-    async def _list_real_select_options(page, field_id):
-        return real_options
+    async def _answer_field(page, q, job, candidate):
+        answer_field_calls.append(q)
 
     async def _safe_select_option(page, field_id, desired_value=None, desired_text=None):
-        calls.append({"value": desired_value, "text": desired_text})
+        select_calls.append({"field_id": field_id, "value": desired_value, "text": desired_text})
         return True
 
-    m._list_real_select_options = _list_real_select_options  # type: ignore[attr-defined]
+    m._answer_field = _answer_field  # type: ignore[attr-defined]
     m._safe_select_option = _safe_select_option  # type: ignore[attr-defined]
     return m
 
 
-async def test_guard_forces_visa_option_over_citizen(monkeypatch):
-    # The rule path hands the visa label string as desired_text; the fuzzy matcher
-    # would have landed on citizen. The guard must force the temporary-visa option.
-    calls: list = []
-    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(AU_Q_6, calls))
+class _Job:
+    url = "https://au.seek.com/job/92765430"
+    title = "Engineer"
+    company = "Acme"
+
+
+def _q(tag="SELECT", label="What are your working rights in Australia?", options=AU_Q_6, fid="AU_Q_6"):
+    return {"tag": tag, "label": label, "id": fid, "options": options}
+
+
+async def test_guard_selects_truthful_visa_option(monkeypatch):
+    af: list = []
+    sel: list = []
+    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(af, sel))
     with EligibilityAnswerGuard():
-        await sys.modules["seek_apply"]._safe_select_option(
-            "page", "AU_Q_6", desired_text="485 Temporary Graduate visa (expires 2027)"
-        )
-    assert calls == [
-        {"value": "tv", "text": "I have a temporary visa that allows me to work in Australia"}
-    ]
+        await sys.modules["seek_apply"]._answer_field("page", _q(), _Job(), {})
+    # selected the temporary-work-visa option by its value; did NOT run the rule path
+    assert sel == [{"field_id": "AU_Q_6", "value": "tv",
+                    "text": "I have a temporary visa that allows me to work in Australia"}]
+    assert af == []
 
 
-async def test_guard_forces_even_when_caller_asked_for_citizen(monkeypatch):
-    # Defence in depth: even if the LLM path returned the citizen text, the guard
-    # overrides it because the option set is an eligibility question.
-    calls: list = []
-    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(AU_Q_6, calls))
-    with EligibilityAnswerGuard():
-        await sys.modules["seek_apply"]._safe_select_option(
-            "page", "AU_Q_6", desired_text="I'm an Australian citizen"
-        )
-    assert calls[0]["value"] == "tv"
-    assert "citizen" not in calls[0]["text"].lower()
-
-
-async def test_guard_delegates_non_eligibility_dropdown(monkeypatch):
-    # An experience dropdown has no citizen/PR/visa options -> pass through verbatim.
-    exp = [{"text": "1 year", "value": "1"}, {"text": "4 years", "value": "4"}]
-    calls: list = []
-    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(exp, calls))
-    with EligibilityAnswerGuard():
-        await sys.modules["seek_apply"]._safe_select_option("page", "Q_EXP", "4")
-    assert calls == [{"value": "4", "text": None}]
-
-
-async def test_guard_delegates_when_all_options_disqualified(monkeypatch):
-    # No truthful option exists -> do NOT invent one; pass the call through.
+async def test_guard_holds_when_no_truthful_option(monkeypatch):
+    af: list = []
+    sel: list = []
     bad = [
         {"text": "I'm an Australian citizen", "value": "c"},
         {"text": "I'm a permanent resident", "value": "pr"},
+        {"text": "I have a student visa", "value": "s"},
     ]
-    calls: list = []
-    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(bad, calls))
+    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(af, sel))
     with EligibilityAnswerGuard():
-        await sys.modules["seek_apply"]._safe_select_option(
-            "page", "AU_Q_6", desired_text="visa"
-        )
-    assert calls == [{"value": None, "text": "visa"}]
+        with pytest.raises(QuestionHeldError):
+            await sys.modules["seek_apply"]._answer_field("page", _q(options=bad), _Job(), {})
+    assert sel == []  # nothing selected
+    assert af == []   # rule path never ran
 
 
-async def test_guard_delegates_when_no_dom_options(monkeypatch):
-    calls: list = []
-    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply([], calls))
+async def test_guard_delegates_non_eligibility_dropdown(monkeypatch):
+    af: list = []
+    sel: list = []
+    exp = [{"text": "1 year", "value": "1"}, {"text": "4 years", "value": "4"}]
+    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(af, sel))
+    q = _q(label="How many years of experience?", options=exp, fid="Q_EXP")
     with EligibilityAnswerGuard():
-        await sys.modules["seek_apply"]._safe_select_option(
-            "page", "Q", desired_value="x"
-        )
-    assert calls == [{"value": "x", "text": None}]
+        await sys.modules["seek_apply"]._answer_field("page", q, _Job(), {})
+    assert len(af) == 1 and sel == []  # delegated to the original rule path
+
+
+async def test_guard_delegates_non_select(monkeypatch):
+    af: list = []
+    sel: list = []
+    monkeypatch.setitem(sys.modules, "seek_apply", _fake_seek_apply(af, sel))
+    q = {"tag": "INPUT", "label": "Are you an Australian citizen?", "id": "x", "options": []}
+    with EligibilityAnswerGuard():
+        await sys.modules["seek_apply"]._answer_field("page", q, _Job(), {})
+    assert len(af) == 1 and sel == []
 
 
 def test_install_restores(monkeypatch):
     fake = _fake_seek_apply([], [])
     monkeypatch.setitem(sys.modules, "seek_apply", fake)
-    original = fake._safe_select_option
+    original = fake._answer_field
     g = EligibilityAnswerGuard()
     g.install()
-    assert fake._safe_select_option is not original
+    assert fake._answer_field is not original
     g.uninstall()
-    assert fake._safe_select_option is original
+    assert fake._answer_field is original
