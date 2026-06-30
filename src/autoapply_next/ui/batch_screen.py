@@ -44,6 +44,7 @@ from ..safe_ui import safe_slot, show_error_dialog
 from .run_status import RunState
 from .run_status_widget import RunStatusWidget
 from .settings_store import SettingsStore
+from .status_text import friendly_status
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,9 @@ class BatchScreen(QWidget):
         else:
             self._mode_label.hide()
 
-        self._status_label = QLabel("Idle")
+        self._status_label = QLabel(
+            "Ready" if self._audience is Audience.USER else "Idle"
+        )
         self._status_label.setStyleSheet("color: #374151;")
         h.addWidget(self._status_label, stretch=1)
 
@@ -138,7 +141,7 @@ class BatchScreen(QWidget):
             self._threshold_label.hide()
 
         self._stop_btn = QPushButton(
-            "Stop" if self._audience is Audience.USER else "STOP batch"
+            "Stop applying" if self._audience is Audience.USER else "STOP batch"
         )
         self._stop_btn.setProperty("buttonRole", "danger")
         self._stop_btn.setEnabled(False)
@@ -196,20 +199,30 @@ class BatchScreen(QWidget):
         self._cover_view = QPlainTextEdit()
         self._cover_view.setReadOnly(True)
         self._cover_view.setStyleSheet(_text_view_css())
-        self._cover_view.setPlaceholderText("Cover letter (post-submit).")
+        self._cover_view.setPlaceholderText(
+            "The cover letter will appear here after AutoApply applies."
+            if self._audience is Audience.USER
+            else "Cover letter (post-submit)."
+        )
         self._tabs.addTab(self._cover_view, "Cover letter")
 
         self._qa_view = QPlainTextEdit()
         self._qa_view.setReadOnly(True)
         self._qa_view.setStyleSheet(_text_view_css())
         self._qa_view.setPlaceholderText("Screening questions and answers.")
-        self._tabs.addTab(self._qa_view, "Screening Q && A")
+        self._tabs.addTab(
+            self._qa_view,
+            "Screening questions" if self._audience is Audience.USER else "Screening Q && A",
+        )
 
         self._error_view = QPlainTextEdit()
         self._error_view.setReadOnly(True)
         self._error_view.setStyleSheet(_text_view_css())
         self._error_view.setPlaceholderText("Error detail if any.")
-        self._tabs.addTab(self._error_view, "Detail")
+        self._tabs.addTab(
+            self._error_view,
+            "Details" if self._audience is Audience.USER else "Detail",
+        )
 
         dv.addWidget(self._tabs, stretch=1)
         splitter.addWidget(detail_wrap)
@@ -226,7 +239,9 @@ class BatchScreen(QWidget):
         )
         h = QHBoxLayout(wrap)
         h.setContentsMargins(12, 6, 12, 6)
-        self._tally_label = QLabel("No batch yet.")
+        self._tally_label = QLabel(
+            "No applications yet." if self._audience is Audience.USER else "No batch yet."
+        )
         self._tally_label.setStyleSheet("color: #111827;")
         h.addWidget(self._tally_label)
         h.addStretch(1)
@@ -304,9 +319,12 @@ class BatchScreen(QWidget):
     def _on_stop_clicked(self) -> None:
         self._worker.stop_batch()
         self._stop_btn.setEnabled(False)
-        self._status_label.setText(
-            self._status_label.text() + "  (STOP requested; finishing current job.)"
-        )
+        if self._audience is Audience.USER:
+            self._status_label.setText("Stopping after the current job.")
+        else:
+            self._status_label.setText(
+                self._status_label.text() + "  (STOP requested; finishing current job.)"
+            )
 
     @Slot(int, int, object)
     @safe_slot
@@ -335,15 +353,7 @@ class BatchScreen(QWidget):
         self, done: int, total: int, result: ApplicationResult
     ) -> str:
         if self._audience is Audience.USER:
-            verb = {
-                ApplicationStatus.SUBMITTED: "sent",
-                ApplicationStatus.SUBMITTED_UNCERTAIN: "sent (check on Seek)",
-                ApplicationStatus.DRY_RUN_VERIFIED: "prepared",
-                ApplicationStatus.SKIPPED_LOW_SCORE: "skipped (low match)",
-                ApplicationStatus.FAILED: "could not finish",
-                ApplicationStatus.CANCELLED: "stopped",
-            }.get(result.status, "done")
-            return f"Applying: {done} of {total} (last: {verb})"
+            return f"Applying to job {done} of {total}"
         verb = {
             ApplicationStatus.SUBMITTED: "submitted",
             ApplicationStatus.SUBMITTED_UNCERTAIN: "submitted (uncertain)",
@@ -364,7 +374,7 @@ class BatchScreen(QWidget):
             if tally.submitted:
                 parts.append(f"{tally.submitted} sent")
             if tally.dry_run_verified:
-                parts.append(f"{tally.dry_run_verified} prepared")
+                parts.append(f"{tally.dry_run_verified} ready to send")
             if tally.submitted_uncertain:
                 parts.append(f"{tally.submitted_uncertain} to check on Seek")
             if tally.skipped_low_score:
@@ -422,7 +432,12 @@ class BatchScreen(QWidget):
             self._clear_detail()
             return
         result = self._results[cur_row]
-        self._detail_header.setText(f"{result.job_url}")
+        if self._audience is Audience.USER:
+            company = self._company_for(result)
+            title = self._title_for(result)
+            self._detail_header.setText(f"{title} at {company}" if company else title)
+        else:
+            self._detail_header.setText(f"{result.job_url}")
         cover = result.cover_letter_text
         # Fall back to the sidecar file the adapter writes after tailor.
         if cover is None and result.cover_pdf is not None:
@@ -492,7 +507,11 @@ class BatchScreen(QWidget):
         self._table.setItem(row_idx, 2, title_item)
         self._table.setItem(row_idx, 3, QTableWidgetItem(company))
 
-        status_text = result.status.value
+        status_text = (
+            friendly_status(result.status.value)
+            if self._audience is Audience.USER
+            else result.status.value
+        )
         status_item = QTableWidgetItem(status_text)
         status_item.setForeground(_status_colour(result.status))
         font = status_item.font()

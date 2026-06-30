@@ -37,6 +37,7 @@ from ..engine.scraping import ScrapeResult
 from ..engine.worker import EngineWorker
 from ..safe_ui import safe_slot, show_error_dialog
 from .settings_store import SettingsStore
+from .status_text import friendly_status
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ class QueueScreen(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        title = QLabel("Job queue" if self._audience is Audience.USER else "Queue")
+        title = QLabel("Find jobs" if self._audience is Audience.USER else "Queue")
         title.setFont(_h1())
         layout.addWidget(title)
 
@@ -102,7 +103,9 @@ class QueueScreen(QWidget):
         h = QHBoxLayout(wrap)
         self._keyword_input = QLineEdit()
         self._keyword_input.setPlaceholderText(
-            "Search keyword (e.g. 'devops engineer')"
+            "Job title you want (e.g. customer service, admin assistant, retail manager)"
+            if self._audience is Audience.USER
+            else "Search keyword (e.g. 'devops engineer')"
         )
         last_kw = self._settings.last_scrape_keyword
         if last_kw:
@@ -111,7 +114,7 @@ class QueueScreen(QWidget):
         h.addWidget(self._keyword_input, stretch=1)
 
         self._refresh_btn = QPushButton(
-            "Find and apply" if self._audience is Audience.USER else "Scrape and apply"
+            "Find jobs and apply" if self._audience is Audience.USER else "Scrape and apply"
         )
         self._refresh_btn.setMinimumWidth(180)
         self._refresh_btn.setProperty("buttonRole", "primary")
@@ -142,25 +145,28 @@ class QueueScreen(QWidget):
         h = QHBoxLayout(wrap)
         h.setContentsMargins(0, 0, 0, 0)
 
-        self._only_queued = QCheckBox("Only queued (not yet applied)")
+        self._only_queued = QCheckBox(
+            "Not applied yet"
+            if self._audience is Audience.USER
+            else "Only queued (not yet applied)"
+        )
         self._only_queued.setChecked(True)
         self._only_queued.toggled.connect(self._refresh_table)
         h.addWidget(self._only_queued)
 
         self._only_above_threshold = QCheckBox(
-            f"Only strong matches ({self._settings.match_threshold}+)"
+            "Strong matches only"
             if self._audience is Audience.USER
             else f"Only score >= threshold ({self._settings.match_threshold})"
         )
         self._only_above_threshold.setChecked(False)
         self._only_above_threshold.toggled.connect(self._refresh_table)
-        self._settings.match_threshold_changed.connect(
-            lambda v: self._only_above_threshold.setText(
-                f"Only strong matches ({v}+)"
-                if self._audience is Audience.USER
-                else f"Only score >= threshold ({v})"
+        if self._audience is not Audience.USER:
+            self._settings.match_threshold_changed.connect(
+                lambda v: self._only_above_threshold.setText(
+                    f"Only score >= threshold ({v})"
+                )
             )
-        )
         h.addWidget(self._only_above_threshold)
 
         h.addStretch(1)
@@ -176,7 +182,7 @@ class QueueScreen(QWidget):
     def _build_table(self) -> QWidget:
         self._table = QTableWidget(0, 6)
         if self._audience is Audience.USER:
-            headers = ["Fit", "Role", "Company", "Status", "URL", ""]
+            headers = ["Match", "Role", "Company", "Status", "URL", ""]
         else:
             headers = ["Score", "Title", "Company", "Status", "URL", ""]
         self._table.setHorizontalHeaderLabels(headers)
@@ -247,11 +253,13 @@ class QueueScreen(QWidget):
             if self._settings.pace_between_applies
             else 0
         )
+        # No daily cap in the user build; the tester build honors the setting.
+        cap = 0 if self._audience is Audience.USER else self._settings.daily_cap
         self._worker.scrape_and_auto_apply(
             kw,
             allow_real_submit=self._settings.allow_real_submit,
             throttle_seconds=effective_throttle,
-            daily_cap=self._settings.daily_cap,
+            daily_cap=cap,
         )
         # Hand off to the Batch screen so the user can see live progress
         # and reach the STOP button without hunting for it.
@@ -347,7 +355,13 @@ class QueueScreen(QWidget):
             self._table.setItem(i, 0, score_item)
             self._table.setItem(i, 1, QTableWidgetItem(row["title"] or ""))
             self._table.setItem(i, 2, QTableWidgetItem(row["company"] or ""))
-            status_item = QTableWidgetItem(row["status"] or "")
+            status_raw = row["status"] or ""
+            status_text = (
+                friendly_status(status_raw)
+                if self._audience is Audience.USER
+                else str(status_raw)
+            )
+            status_item = QTableWidgetItem(status_text)
             self._table.setItem(i, 3, status_item)
             url_item = QTableWidgetItem(row["url"] or "")
             url_item.setToolTip(row["url"] or "")
@@ -362,7 +376,9 @@ class QueueScreen(QWidget):
 
         if not rows:
             self._count_label.setText(
-                "No jobs match the current filters. "
+                "No jobs to show yet. Type a job title above and select Find jobs and apply."
+                if self._audience is Audience.USER
+                else "No jobs match the current filters. "
                 "Scrape a keyword or untick 'Only queued'."
             )
 

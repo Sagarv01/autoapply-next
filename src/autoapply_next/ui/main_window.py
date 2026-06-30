@@ -95,7 +95,7 @@ class MainWindow(QMainWindow):
             engine_workdir=engine_workdir, auth_manager=self._auth, runner=self._runner
         )
         self._session = SessionSetupScreen(
-            engine_workdir=engine_workdir, worker=self._worker
+            engine_workdir=engine_workdir, worker=self._worker, audience=self._audience
         )
         self._profile = ProfileScreen(engine_workdir=engine_workdir)
         self._queue = QueueScreen(
@@ -114,7 +114,9 @@ class MainWindow(QMainWindow):
             settings=self._settings,
             audience=self._audience,
         )
-        self._results = ResultsScreen(engine_workdir=engine_workdir)
+        self._results = ResultsScreen(
+            engine_workdir=engine_workdir, audience=self._audience
+        )
         self._held_screen = HeldQueueScreen(
             engine_workdir=engine_workdir, runner=self._runner
         )
@@ -186,16 +188,19 @@ class MainWindow(QMainWindow):
         self._actions: dict[QWidget, QAction] = {}
         toolbar.addWidget(self._build_brand())
         toolbar.addSeparator()
+        u = self._audience is Audience.USER
+        # End-user nav labels match their page titles exactly (no verb/noun
+        # whiplash); the tester build keeps the short internal names.
         screens = [
-            (self._onboarding, "Set up"),
-            (self._session, "Seek session"),
+            (self._onboarding, "Get started" if u else "Set up"),
+            (self._session, "Seek account" if u else "Seek session"),
             (self._profile, "Profile"),
-            (self._queue, "Queue"),
+            (self._queue, "Find jobs" if u else "Queue"),
             (self._run, "Run"),
-            (self._batch, "Applications" if self._audience is Audience.USER else "Batch"),
-            (self._results, "Results"),
+            (self._batch, "Applications" if u else "Batch"),
+            (self._results, "Applied jobs" if u else "Results"),
             (self._held_screen, "Waiting on you"),
-            (self._billing, "Upgrade"),
+            (self._billing, "Your plan" if u else "Upgrade"),
             (self._settings_screen, "Settings"),
         ]
         for i, (screen, label) in enumerate(screens):
@@ -227,7 +232,8 @@ class MainWindow(QMainWindow):
         text.setSpacing(0)
         name = QLabel("AutoApply", wrap)
         name.setObjectName("brand-name")
-        subtitle = QLabel("Tester" if self._audience is Audience.TESTER else "Desktop", wrap)
+        subtitle = QLabel("Tester" if self._audience is Audience.TESTER else "", wrap)
+        subtitle.setVisible(self._audience is Audience.TESTER)
         subtitle.setObjectName("brand-subtitle")
         text.addWidget(name)
         text.addWidget(subtitle)
@@ -346,21 +352,26 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------- onboarding gate
 
     def _apply_onboarding_gate(self) -> None:
-        """Lock the apply screens until onboarding is complete; show the wizard
-        while it is not."""
+        """Until set-up is complete the sidebar shows ONLY the set-up flow, so a
+        signed-out / half-onboarded user sees one focused screen instead of a
+        full app they cannot use yet. Once complete, reveal everything the
+        current audience is allowed to see."""
         complete = ob.is_onboarding_complete(
             self._engine_workdir,
             signed_in=self._auth.signed_in,
             acknowledged=ob.load_flags(self._engine_workdir)["acknowledged"],
         )
-        for screen in self._bot_screens:
-            action = self._actions.get(screen)
-            if action is not None:
-                action.setEnabled(complete and self._screen_available(screen))
-        # While set-up is incomplete, keep the user on a permitted screen (the
-        # wizard, or the always-available setup screens), never a locked one.
-        allowed = {self._onboarding, self._session, self._profile, self._settings_screen}
-        if not complete and self._stack.currentWidget() not in allowed:
+        for screen, action in self._actions.items():
+            if screen is self._onboarding:
+                # The set-up entry is always present.
+                action.setVisible(True)
+                action.setEnabled(True)
+                continue
+            available = complete and self._screen_available(screen)
+            action.setVisible(available)
+            action.setEnabled(available)
+        # While set-up is incomplete, keep the user on the wizard.
+        if not complete and self._stack.currentWidget() is not self._onboarding:
             self._goto(self._onboarding)
 
     def _screen_available(self, screen: QWidget) -> bool:
@@ -409,7 +420,8 @@ class MainWindow(QMainWindow):
         per_job = getattr(tally, "per_job", None) or []
         if any(getattr(r, "exception_type", None) == "NeedsProError" for r in per_job):
             self.statusBar().showMessage(
-                "Per-job tailoring is a Pro feature. Here's how to upgrade.", 8000
+                "Matching your resume to each job is a Pro feature. Here's how to upgrade.",
+                8000,
             )
             self._goto(self._billing)
 

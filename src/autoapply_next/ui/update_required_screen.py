@@ -29,7 +29,7 @@ class UpdateRequiredScreen(QWidget):
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(16)
 
-        title = QLabel("Time to update")
+        title = QLabel("Update available")
         title.setFont(_h1())
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -43,7 +43,7 @@ class UpdateRequiredScreen(QWidget):
         self._message.setStyleSheet("color: #374151;")
         layout.addWidget(self._message)
 
-        self._btn = QPushButton("Download the latest version")
+        self._btn = QPushButton("Download update")
         self._btn.setProperty("buttonRole", "primary")
         self._btn.clicked.connect(self.download)
         layout.addWidget(self._btn, alignment=Qt.AlignCenter)

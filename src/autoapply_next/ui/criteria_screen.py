@@ -77,7 +77,7 @@ class CriteriaScreen(QWidget):
         layout.setContentsMargins(36, 36, 36, 36)
         layout.setSpacing(12)
 
-        title = QLabel("What should AutoApply look for?")
+        title = QLabel("Your job preferences")
         title.setFont(_h1())
         layout.addWidget(title)
         intro = QLabel("Tell it the roles you want and where. You can change this any time.")
@@ -87,8 +87,8 @@ class CriteriaScreen(QWidget):
 
         form = QFormLayout()
         self._skills = QLineEdit()
-        self._skills.setPlaceholderText("e.g. AWS, DevOps, Cloud Engineer")
-        form.addRow(QLabel("Keywords or job titles"), self._skills)
+        self._skills.setPlaceholderText("e.g. customer service, admin assistant, retail manager")
+        form.addRow(QLabel("Job titles you want"), self._skills)
         self._location = QLineEdit()
         self._location.setPlaceholderText("e.g. Sydney, or Australia")
         form.addRow(QLabel("Location"), self._location)

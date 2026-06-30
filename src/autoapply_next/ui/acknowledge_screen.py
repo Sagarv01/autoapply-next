@@ -36,7 +36,7 @@ class AcknowledgeScreen(QWidget):
         layout.setAlignment(Qt.AlignCenter)
         layout.setSpacing(18)
 
-        title = QLabel("One last thing")
+        title = QLabel("Before you start")
         title.setFont(_h1())
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
@@ -52,7 +52,7 @@ class AcknowledgeScreen(QWidget):
         self._error.setAlignment(Qt.AlignCenter)
         layout.addWidget(self._error)
 
-        self._continue = QPushButton("I understand, continue")
+        self._continue = QPushButton("Agree and continue")
         self._continue.setProperty("buttonRole", "primary")
         self._continue.setEnabled(False)
         self._continue.clicked.connect(self.submit)

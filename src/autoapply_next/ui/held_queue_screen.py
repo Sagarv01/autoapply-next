@@ -76,7 +76,7 @@ class HeldQueueScreen(QWidget):
         self._status.setWordWrap(True)
         layout.addWidget(self._status)
 
-        self._save_btn = QPushButton("Save answer")
+        self._save_btn = QPushButton("Save and continue")
         self._save_btn.setProperty("buttonRole", "primary")
         self._save_btn.clicked.connect(self.submit_answer)
         layout.addWidget(self._save_btn)

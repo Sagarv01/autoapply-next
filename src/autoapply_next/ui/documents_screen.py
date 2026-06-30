@@ -59,14 +59,14 @@ class DocumentsScreen(QWidget):
         intro.setStyleSheet("color: #6b7280;")
         layout.addWidget(intro)
 
-        self._resume_btn = QPushButton("Choose resume...")
+        self._resume_btn = QPushButton("Upload resume")
         self._resume_btn.setProperty("buttonRole", "primary")
         self._resume_btn.clicked.connect(self._pick_resume)
         layout.addWidget(self._resume_btn)
         self._resume_status = QLabel()
         layout.addWidget(self._resume_status)
 
-        self._cover_btn = QPushButton("Choose cover letter (optional)...")
+        self._cover_btn = QPushButton("Upload cover letter (optional)")
         self._cover_btn.clicked.connect(self._pick_cover)
         layout.addWidget(self._cover_btn)
         self._cover_status = QLabel()

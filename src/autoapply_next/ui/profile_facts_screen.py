@@ -51,7 +51,7 @@ class ProfileFactsScreen(QWidget):
         outer.setContentsMargins(24, 24, 24, 24)
         outer.setSpacing(12)
 
-        title = QLabel("A few questions about you")
+        title = QLabel("About you")
         title.setFont(_h1())
         outer.addWidget(title)
         intro = QLabel(

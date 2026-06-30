@@ -65,7 +65,7 @@ class SignInScreen(QWidget):
         layout.addWidget(self._email, alignment=Qt.AlignCenter)
 
         self._password = QLineEdit()
-        self._password.setPlaceholderText("password")
+        self._password.setPlaceholderText("Your password")
         self._password.setEchoMode(QLineEdit.Password)
         self._password.setMaximumWidth(360)
         self._password.returnPressed.connect(self.submit_sign_in)

@@ -145,23 +145,26 @@ class SettingsScreen(QWidget):
             lambda v: setattr(self._settings, "match_threshold", v)
         )
         form.addRow(
-            "Minimum job match:"
+            "Minimum match score (higher = pickier):"
             if self._audience is Audience.USER
             else "Match score threshold:",
             self._threshold_spin,
         )
 
-        self._cap_spin = QSpinBox()
-        self._cap_spin.setRange(0, 999)
-        self._cap_spin.setValue(self._settings.daily_cap)
-        self._cap_spin.setSuffix(" / day")
-        self._cap_spin.setToolTip(
-            "Maximum real submissions per day. AutoApply also has a hard 100/day ceiling."
-        )
-        self._cap_spin.valueChanged.connect(
-            lambda v: setattr(self._settings, "daily_cap", v)
-        )
-        form.addRow("Daily application cap:", self._cap_spin)
+        # No daily application cap in the user build. The tester build keeps a
+        # configurable cap for diagnosis.
+        if self._audience is not Audience.USER:
+            self._cap_spin = QSpinBox()
+            self._cap_spin.setRange(0, 999)
+            self._cap_spin.setValue(self._settings.daily_cap)
+            self._cap_spin.setSuffix(" / day")
+            self._cap_spin.setToolTip(
+                "Maximum real submissions per day. AutoApply also has a hard 100/day ceiling."
+            )
+            self._cap_spin.valueChanged.connect(
+                lambda v: setattr(self._settings, "daily_cap", v)
+            )
+            form.addRow("Daily application cap:", self._cap_spin)
 
         self._pace_box = QCheckBox("Pace between applies (60-120s, recommended)")
         self._pace_box.setChecked(self._settings.pace_between_applies)
@@ -182,7 +185,7 @@ class SettingsScreen(QWidget):
 
         note = QLabel(
             "The minimum match decides which jobs AutoApply applies to. "
-            "The daily cap limits how many it sends per day."
+            "Higher means stricter."
             if self._audience is Audience.USER
             else (
                 "Threshold determines when a scraped job would be skipped at apply "

@@ -17,12 +17,17 @@ def test_user_build_hides_tester_only_screens(qtbot, tmp_path, monkeypatch):
     win = MainWindow(engine_workdir=tmp_path)
     qtbot.addWidget(win)
 
+    # Tester-only screens (raw profile editor + single-URL run) are never
+    # available in the user build.
     assert not win._actions[win._profile].isVisible()
     assert not win._actions[win._profile].isEnabled()
     assert not win._actions[win._run].isVisible()
     assert not win._actions[win._run].isEnabled()
-    assert win._actions[win._queue].isVisible()
-    assert win._actions[win._settings_screen].isVisible()
+    # Before set-up is complete, the sidebar shows only the Get started flow;
+    # the rest of the app stays hidden until onboarding finishes.
+    assert win._actions[win._onboarding].isVisible()
+    assert not win._actions[win._queue].isVisible()
+    assert not win._actions[win._settings_screen].isVisible()
 
     current = win._stack.currentWidget()
     win._goto(win._run)
@@ -33,7 +38,7 @@ def test_user_build_hides_tester_only_screens(qtbot, tmp_path, monkeypatch):
     assert win._engine_label.text() == "AutoApply is ready"
     assert win._batch._mode_label.isHidden()
     assert win._batch._threshold_label.isHidden()
-    assert win._batch._stop_btn.text() == "Stop"
+    assert win._batch._stop_btn.text() == "Stop applying"
     win.close()
 
 

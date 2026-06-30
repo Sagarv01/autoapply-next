@@ -124,7 +124,7 @@ class BillingScreen(QWidget):
     def _apply_status(self, status: dict) -> None:
         self._tier = (status.get("tier") or "free").lower()
         if self._tier == "pro":
-            self._status.setText("You're on the Pro plan. Per-job tailoring is on.")
+            self._status.setText("You're on the Pro plan. Each application is tailored to the job.")
             self._show_upgrade(False)
         elif self._tier == "basic":
             self._status.setText("You're on the Basic plan (unlimited applications).")
