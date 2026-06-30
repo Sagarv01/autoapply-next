@@ -18,6 +18,7 @@ _FRIENDLY = {
     "failed": "Could not finish",
     "cancelled": "Stopped",
     "held": "Waiting on you",
+    "dismissed": "Removed",
 }
 
 

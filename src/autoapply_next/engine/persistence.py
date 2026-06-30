@@ -870,6 +870,38 @@ def recover_orphans(
 # --------------------------------------------------------------------- requeue
 
 
+DISMISSED_STATUS = "dismissed"
+
+# Statuses we never overwrite with 'dismissed': they record a real application
+# (or one in flight) that must stay in the user's history.
+_UNDISMISSABLE = ("applied", "submitted", "submitted_uncertain", "in_progress")
+
+
+def dismiss_jobs(*, engine_workdir: Path, urls: list[str]) -> int:
+    """Mark scraped jobs as 'dismissed' so AutoApply skips them.
+
+    A dismissed job drops out of the queue view, is excluded from the apply
+    batch (which only runs `status='queued'`), and the scraper's jobs.db
+    dedupe keeps it from being re-added on the next search. Rows that represent
+    a real application (applied / submitted / in_progress) are left untouched.
+    Returns the number of rows dismissed.
+    """
+    db_path = Path(engine_workdir) / "jobs.db"
+    canon = [canonical_seek_url(u) for u in (urls or []) if u]
+    if not db_path.exists() or not canon:
+        return 0
+    placeholders = ",".join("?" * len(canon))
+    not_in = ",".join("?" * len(_UNDISMISSABLE))
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"UPDATE applications SET status = ? "
+            f"WHERE url IN ({placeholders}) AND status NOT IN ({not_in})",
+            (DISMISSED_STATUS, *canon, *_UNDISMISSABLE),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
 def requeue_job(*, engine_workdir: Path, url: str) -> str:
     """Manually re-queue a previously-failed job back to 'queued'.
 

@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..audience import Audience, current_audience
+from ..engine.persistence import dismiss_jobs
 from ..engine.scraping import ScrapeResult
 from ..engine.worker import EngineWorker
 from ..safe_ui import safe_slot, show_error_dialog
@@ -171,6 +172,14 @@ class QueueScreen(QWidget):
 
         h.addStretch(1)
 
+        self._remove_btn = QPushButton("Remove selected")
+        self._remove_btn.setEnabled(False)
+        self._remove_btn.setToolTip(
+            "Remove the selected jobs from the list so AutoApply skips them."
+        )
+        self._remove_btn.clicked.connect(self._on_remove_clicked)
+        h.addWidget(self._remove_btn)
+
         self._reload_btn = QPushButton("Reload table")
         self._reload_btn.clicked.connect(self._refresh_table)
         if self._audience is Audience.USER:
@@ -191,7 +200,9 @@ class QueueScreen(QWidget):
         )
         self._table.horizontalHeader().setStretchLastSection(False)
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
+        self._table.setSelectionMode(QTableWidget.ExtendedSelection)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._table.setColumnWidth(0, 64)
         self._table.setColumnWidth(3, 80)
         self._table.setColumnWidth(5, 110)
@@ -265,6 +276,32 @@ class QueueScreen(QWidget):
         # and reach the STOP button without hunting for it.
         self.auto_apply_started.emit()
 
+    @Slot()
+    def _on_selection_changed(self) -> None:
+        self._remove_btn.setEnabled(bool(self._table.selectedIndexes()))
+
+    def _selected_urls(self) -> list[str]:
+        rows = sorted({idx.row() for idx in self._table.selectedIndexes()})
+        urls: list[str] = []
+        for r in rows:
+            item = self._table.item(r, 4)  # URL column (hidden in user mode)
+            if item and item.text():
+                urls.append(item.text())
+        return urls
+
+    @Slot()
+    @safe_slot
+    def _on_remove_clicked(self) -> None:
+        urls = self._selected_urls()
+        if not urls:
+            return
+        n = dismiss_jobs(engine_workdir=self._engine_workdir, urls=urls)
+        self._remove_btn.setEnabled(False)
+        self._refresh_table()
+        self._count_label.setText(
+            f"Removed {n} job{'' if n == 1 else 's'} from your list."
+        )
+
     @Slot(str)
     def _on_log(self, line: str) -> None:
         # Treat the log signal as a status tick from the worker.
@@ -301,6 +338,9 @@ class QueueScreen(QWidget):
     def _on_worker_state(self, state: str) -> None:
         running = state in ("running", "cancelling")
         self._refresh_btn.setEnabled(not running)
+        self._remove_btn.setEnabled(
+            not running and bool(self._table.selectedIndexes())
+        )
         self._cancel_btn.setEnabled(running)
         self._progress_bar.setVisible(running)
         self._keyword_input.setEnabled(not running)
