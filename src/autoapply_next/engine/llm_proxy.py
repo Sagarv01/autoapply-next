@@ -65,7 +65,13 @@ class KillSwitchError(ProxyError):
 
 # ── configuration ───────────────────────────────────────────────────────────
 def _proxy_base_url() -> str:
-    return (os.environ.get("AUTOAPPLY_PROXY_URL") or "https://api.autoapply.com.au").rstrip("/")
+    # Proxy runs on GCP Cloud Run (Sydney). api.autoapply.com.au will become the
+    # branded alias once the custom domain is mapped; until then we hit the
+    # run.app URL directly. Override with AUTOAPPLY_PROXY_URL for local/dev.
+    return (
+        os.environ.get("AUTOAPPLY_PROXY_URL")
+        or "https://autoapply-proxy-799883391199.australia-southeast1.run.app"
+    ).rstrip("/")
 
 
 def _client_version() -> str:
