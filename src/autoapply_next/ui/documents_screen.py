@@ -60,14 +60,13 @@ class DocumentsScreen(QWidget):
         layout.addWidget(intro)
 
         self._resume_btn = QPushButton("Choose resume...")
-        self._resume_btn.setStyleSheet(_primary_btn())
+        self._resume_btn.setProperty("buttonRole", "primary")
         self._resume_btn.clicked.connect(self._pick_resume)
         layout.addWidget(self._resume_btn)
         self._resume_status = QLabel()
         layout.addWidget(self._resume_status)
 
         self._cover_btn = QPushButton("Choose cover letter (optional)...")
-        self._cover_btn.setStyleSheet(_secondary_btn())
         self._cover_btn.clicked.connect(self._pick_cover)
         layout.addWidget(self._cover_btn)
         self._cover_status = QLabel()
@@ -158,18 +157,3 @@ def _h1() -> QFont:
     f.setPointSize(20)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 10px 16px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; color: #e0e7ff; }"
-    )
-
-
-def _secondary_btn() -> str:
-    return (
-        "QPushButton { background: #f3f4f6; color: #111827; padding: 10px 16px; "
-        "border-radius: 6px; border: 1px solid #d1d5db; }"
-    )

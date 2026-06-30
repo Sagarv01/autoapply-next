@@ -16,18 +16,22 @@ from pathlib import Path
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QHBoxLayout,
     QLabel,
     QMainWindow,
+    QSizePolicy,
     QStackedWidget,
     QStatusBar,
     QToolBar,
+    QVBoxLayout,
     QWidget,
 )
 
+from ..audience import Audience, current_audience
+from ..auth.manager import AuthManager
 from ..engine.worker import EngineWorker
 from ..safe_ui import get_bus, safe_slot, show_error_dialog
 from .batch_screen import BatchScreen
-from ..auth.manager import AuthManager
 from ..engine.llm_proxy import _client_version, fetch_min_client_version
 from ..onboarding import state as ob
 from ..version_check import is_update_required
@@ -66,6 +70,9 @@ class MainWindow(QMainWindow):
         self.resize(1100, 760)
 
         self._engine_workdir = engine_workdir
+        self._audience = current_audience()
+        if self._audience is Audience.USER:
+            self.setWindowTitle("AutoApply")
         self._settings = SettingsStore(engine_workdir / "ui-settings.json")
 
         # Worker owns its own Python thread + asyncio loop internally.
@@ -95,6 +102,7 @@ class MainWindow(QMainWindow):
             engine_workdir=engine_workdir,
             worker=self._worker,
             settings=self._settings,
+            audience=self._audience,
         )
         self._run = RunScreen(
             worker=self._worker,
@@ -104,6 +112,7 @@ class MainWindow(QMainWindow):
             engine_workdir=engine_workdir,
             worker=self._worker,
             settings=self._settings,
+            audience=self._audience,
         )
         self._results = ResultsScreen(engine_workdir=engine_workdir)
         self._held_screen = HeldQueueScreen(
@@ -111,7 +120,9 @@ class MainWindow(QMainWindow):
         )
         self._billing = BillingScreen(runner=self._runner)
         self._update_screen = UpdateRequiredScreen()  # shown only if below floor
-        self._settings_screen = SettingsScreen(settings=self._settings)
+        self._settings_screen = SettingsScreen(
+            settings=self._settings, audience=self._audience
+        )
 
         # Wire Queue -> Run handoff: selecting a row swaps to Run with URL preloaded.
         self._queue.run_requested.connect(self._on_queue_run_requested)
@@ -153,6 +164,7 @@ class MainWindow(QMainWindow):
         self._runner.succeeded.connect(self._on_runner_succeeded)
         self._runner.failed.connect(self._on_runner_failed)
         self._apply_onboarding_gate()
+        self._highlight_action(self._stack.currentWidget())
         self._runner.submit(self._auth.restore, token="auth_restore")
         # Check the version floor off-thread; if below it, wall the app.
         self._runner.submit_coro(fetch_min_client_version(), token="version_check")
@@ -169,8 +181,11 @@ class MainWindow(QMainWindow):
         toolbar = QToolBar("Navigation", self)
         toolbar.setMovable(False)
         toolbar.setObjectName("nav-toolbar")
+        toolbar.setFixedWidth(188)
         self.addToolBar(Qt.LeftToolBarArea, toolbar)
         self._actions: dict[QWidget, QAction] = {}
+        toolbar.addWidget(self._build_brand())
+        toolbar.addSeparator()
         screens = [
             (self._onboarding, "Set up"),
             (self._session, "Seek session"),
@@ -189,18 +204,51 @@ class MainWindow(QMainWindow):
             action.setShortcut(QKeySequence(f"Ctrl+{i+1}"))
             action.triggered.connect(lambda _checked, s=screen: self._goto(s))
             toolbar.addAction(action)
+            if self._audience is Audience.USER and screen in {self._profile, self._run}:
+                action.setVisible(False)
+                action.setEnabled(False)
             self._actions[screen] = action
+
+    def _build_brand(self) -> QWidget:
+        wrap = QWidget(self)
+        wrap.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(4, 4, 4, 10)
+        row.setSpacing(8)
+
+        mark = QLabel("A", wrap)
+        mark.setObjectName("brand-mark")
+        mark.setAlignment(Qt.AlignCenter)
+        mark.setFixedSize(34, 34)
+        row.addWidget(mark)
+
+        text = QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(0)
+        name = QLabel("AutoApply", wrap)
+        name.setObjectName("brand-name")
+        subtitle = QLabel("Tester" if self._audience is Audience.TESTER else "Desktop", wrap)
+        subtitle.setObjectName("brand-subtitle")
+        text.addWidget(name)
+        text.addWidget(subtitle)
+        row.addLayout(text, stretch=1)
+        return wrap
 
     def _build_status_bar(self) -> None:
         bar = QStatusBar(self)
         self.setStatusBar(bar)
-        self._gate_label = QLabel("DRY-RUN", self)
-        self._gate_label.setStyleSheet(
-            "padding: 2px 8px; background: #15803d; color: white; "
-            "border-radius: 4px; font-weight: bold;"
-        )
-        bar.addPermanentWidget(self._gate_label)
-        self._engine_label = QLabel(f"engine: {self._engine_workdir}", self)
+        if self._audience is Audience.TESTER:
+            self._gate_label: QLabel | None = QLabel("DRY-RUN", self)
+            self._gate_label.setStyleSheet(
+                "padding: 2px 8px; background: #15803d; color: white; "
+                "border-radius: 4px; font-weight: bold;"
+            )
+            bar.addPermanentWidget(self._gate_label)
+            engine_text = f"engine: {self._engine_workdir}"
+        else:
+            self._gate_label = None
+            engine_text = "AutoApply is ready"
+        self._engine_label = QLabel(engine_text, self)
         self._engine_label.setStyleSheet("color: #6b7280;")
         bar.addWidget(self._engine_label)
 
@@ -214,6 +262,8 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------- navigation
 
     def _goto(self, screen: QWidget) -> None:
+        if not self._screen_available(screen):
+            return
         self._stack.setCurrentWidget(screen)
         self._highlight_action(screen)
         # These two pull live state; refresh when shown (off-thread for billing).
@@ -230,6 +280,8 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def _on_allow_real_submit_changed(self, allowed: bool) -> None:
+        if self._gate_label is None:
+            return
         if allowed:
             self._gate_label.setText("LIVE SUBMIT")
             self._gate_label.setStyleSheet(
@@ -291,12 +343,17 @@ class MainWindow(QMainWindow):
         for screen in self._bot_screens:
             action = self._actions.get(screen)
             if action is not None:
-                action.setEnabled(complete)
+                action.setEnabled(complete and self._screen_available(screen))
         # While set-up is incomplete, keep the user on a permitted screen (the
         # wizard, or the always-available setup screens), never a locked one.
         allowed = {self._onboarding, self._session, self._profile, self._settings_screen}
         if not complete and self._stack.currentWidget() not in allowed:
             self._goto(self._onboarding)
+
+    def _screen_available(self, screen: QWidget) -> bool:
+        if self._audience is Audience.USER and screen in {self._profile, self._run}:
+            return False
+        return True
 
     @Slot(object, object)
     def _on_runner_succeeded(self, result, token) -> None:

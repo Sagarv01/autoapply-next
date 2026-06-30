@@ -10,5 +10,5 @@ Screens:
   3. QueueScreen            Scrape + score jobs, queue selected ones
   4. RunScreen              Live progress for one application (the skeleton)
   5. ResultsScreen          History + per-job review (cover letter + screening answers)
-  6. SettingsScreen         ALLOW_REAL_SUBMIT toggle (with warning), thresholds
+  6. SettingsScreen         Tester gate + user-safe settings
 """

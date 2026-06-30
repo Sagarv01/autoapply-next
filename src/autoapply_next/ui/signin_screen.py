@@ -82,12 +82,11 @@ class SignInScreen(QWidget):
         row.setAlignment(Qt.AlignCenter)
         self._signin_btn = QPushButton("Sign in")
         self._signin_btn.setMinimumWidth(160)
-        self._signin_btn.setStyleSheet(_primary_btn())
+        self._signin_btn.setProperty("buttonRole", "primary")
         self._signin_btn.clicked.connect(self.submit_sign_in)
         row.addWidget(self._signin_btn)
         self._signup_btn = QPushButton("Create account")
         self._signup_btn.setMinimumWidth(160)
-        self._signup_btn.setStyleSheet(_secondary_btn())
         self._signup_btn.clicked.connect(self.submit_sign_up)
         row.addWidget(self._signup_btn)
         layout.addLayout(row)
@@ -191,19 +190,3 @@ def _h1() -> QFont:
     f.setPointSize(22)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 10px 16px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; color: #e0e7ff; }"
-    )
-
-
-def _secondary_btn() -> str:
-    return (
-        "QPushButton { background: #f3f4f6; color: #111827; padding: 10px 16px; "
-        "border-radius: 6px; border: 1px solid #d1d5db; }"
-        "QPushButton:disabled { color: #9ca3af; }"
-    )

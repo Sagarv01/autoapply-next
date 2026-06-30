@@ -36,6 +36,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..audience import Audience, current_audience
 from ..engine.batch import BatchRunResult
 from ..engine.results import ApplicationResult, ApplicationStatus
 from ..engine.worker import EngineWorker
@@ -59,11 +60,13 @@ class BatchScreen(QWidget):
         engine_workdir: Path,
         worker: EngineWorker,
         settings: SettingsStore,
+        audience: Audience | None = None,
     ):
         super().__init__()
         self._engine_workdir = engine_workdir
         self._worker = worker
         self._settings = settings
+        self._audience = audience or current_audience()
         # Maps url -> row index in the table so per-job updates land in
         # the right cell. New URLs append new rows.
         self._row_for_url: dict[str, int] = {}
@@ -75,7 +78,9 @@ class BatchScreen(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        title = QLabel("Batch (auto-apply)")
+        title = QLabel(
+            "Applications" if self._audience is Audience.USER else "Batch (auto-apply)"
+        )
         title.setFont(_h1())
         layout.addWidget(title)
 
@@ -116,7 +121,10 @@ class BatchScreen(QWidget):
         self._mode_label = QLabel()
         self._mode_label.setMinimumWidth(120)
         self._mode_label.setAlignment(Qt.AlignCenter)
-        h.addWidget(self._mode_label)
+        if self._audience is Audience.TESTER:
+            h.addWidget(self._mode_label)
+        else:
+            self._mode_label.hide()
 
         self._status_label = QLabel("Idle")
         self._status_label.setStyleSheet("color: #374151;")
@@ -124,15 +132,23 @@ class BatchScreen(QWidget):
 
         self._threshold_label = QLabel()
         self._threshold_label.setStyleSheet("color: #6b7280;")
-        h.addWidget(self._threshold_label)
+        if self._audience is Audience.TESTER:
+            h.addWidget(self._threshold_label)
+        else:
+            self._threshold_label.hide()
 
-        self._stop_btn = QPushButton("STOP batch")
-        self._stop_btn.setStyleSheet(_stop_btn_css())
-        self._stop_btn.setEnabled(False)
-        self._stop_btn.setToolTip(
-            "Halt the batch after the current job completes. The remaining "
-            "jobs stay 'queued'; the next Scrape-and-apply picks them back up."
+        self._stop_btn = QPushButton(
+            "Stop" if self._audience is Audience.USER else "STOP batch"
         )
+        self._stop_btn.setProperty("buttonRole", "danger")
+        self._stop_btn.setEnabled(False)
+        if self._audience is Audience.USER:
+            self._stop_btn.setToolTip("Stop after the current application finishes.")
+        else:
+            self._stop_btn.setToolTip(
+                "Halt the batch after the current job completes. The remaining "
+                "jobs stay 'queued'; the next Scrape-and-apply picks them back up."
+            )
         self._stop_btn.clicked.connect(self._on_stop_clicked)
         h.addWidget(self._stop_btn)
         return wrap
@@ -163,10 +179,15 @@ class BatchScreen(QWidget):
         detail_wrap = QWidget()
         dv = QVBoxLayout(detail_wrap)
         dv.setContentsMargins(0, 0, 0, 0)
-        self._detail_header = QLabel(
-            "Auto-apply runs without per-job preview; "
-            "completed rows show their cover letter and Q&A here."
+        detail_text = (
+            "Completed applications show their cover letter and Q&A here."
+            if self._audience is Audience.USER
+            else (
+                "Auto-apply runs without per-job preview; "
+                "completed rows show their cover letter and Q&A here."
+            )
         )
+        self._detail_header = QLabel(detail_text)
         self._detail_header.setFont(_h2())
         self._detail_header.setWordWrap(True)
         dv.addWidget(self._detail_header)
@@ -221,10 +242,14 @@ class BatchScreen(QWidget):
 
     @Slot(int)
     def _refresh_threshold_label(self, value: int) -> None:
+        if self._audience is Audience.USER:
+            return
         self._threshold_label.setText(f"threshold >= {value}")
 
     @Slot(bool)
     def _refresh_mode_label(self, allowed: bool) -> None:
+        if self._audience is Audience.USER:
+            return
         if allowed:
             self._mode_label.setText("LIVE SUBMIT")
             self._mode_label.setStyleSheet(
@@ -509,14 +534,6 @@ def _h2() -> QFont:
     f.setPointSize(13)
     f.setBold(True)
     return f
-
-
-def _stop_btn_css() -> str:
-    return (
-        "QPushButton { background: #b91c1c; color: white; padding: 8px 16px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #fecaca; color: #fff; }"
-    )
 
 
 def _text_view_css() -> str:

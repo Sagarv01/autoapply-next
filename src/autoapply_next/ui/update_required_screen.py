@@ -44,7 +44,7 @@ class UpdateRequiredScreen(QWidget):
         layout.addWidget(self._message)
 
         self._btn = QPushButton("Download the latest version")
-        self._btn.setStyleSheet(_primary_btn())
+        self._btn.setProperty("buttonRole", "primary")
         self._btn.clicked.connect(self.download)
         layout.addWidget(self._btn, alignment=Qt.AlignCenter)
 
@@ -60,10 +60,3 @@ def _h1() -> QFont:
     f.setPointSize(22)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 12px 20px; "
-        "border-radius: 6px; font-weight: bold; }"
-    )

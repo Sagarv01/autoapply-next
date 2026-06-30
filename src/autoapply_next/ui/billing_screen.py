@@ -65,7 +65,7 @@ class BillingScreen(QWidget):
         layout.addWidget(self._status)
 
         self._upgrade_btn = QPushButton("Upgrade to Pro")
-        self._upgrade_btn.setStyleSheet(_primary_btn())
+        self._upgrade_btn.setProperty("buttonRole", "primary")
         self._upgrade_btn.setVisible(False)
         self._upgrade_btn.clicked.connect(self.start_upgrade)
         layout.addWidget(self._upgrade_btn, alignment=Qt.AlignCenter)
@@ -162,11 +162,3 @@ def _h1() -> QFont:
     f.setPointSize(20)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 10px 18px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; color: #e0e7ff; }"
-    )

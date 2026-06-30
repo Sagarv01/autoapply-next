@@ -182,16 +182,10 @@ class RunScreen(QWidget):
     def _refresh_button_label(self, allowed: bool) -> None:
         if allowed:
             self._run_btn.setText("Run with LIVE submit")
-            self._run_btn.setStyleSheet(
-                "QPushButton { background: #b91c1c; color: white; "
-                "padding: 8px 16px; border-radius: 6px; font-weight: bold; }"
-            )
+            _set_button_role(self._run_btn, "danger")
         else:
             self._run_btn.setText("Run dry-run")
-            self._run_btn.setStyleSheet(
-                "QPushButton { background: #15803d; color: white; "
-                "padding: 8px 16px; border-radius: 6px; font-weight: bold; }"
-            )
+            _set_button_role(self._run_btn, "success")
 
     @Slot()
     @safe_slot
@@ -466,3 +460,9 @@ def _h2() -> QFont:
     f.setPointSize(13)
     f.setBold(True)
     return f
+
+
+def _set_button_role(button: QPushButton, role: str) -> None:
+    button.setProperty("buttonRole", role)
+    button.style().unpolish(button)
+    button.style().polish(button)

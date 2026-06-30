@@ -53,7 +53,7 @@ class AcknowledgeScreen(QWidget):
         layout.addWidget(self._error)
 
         self._continue = QPushButton("I understand, continue")
-        self._continue.setStyleSheet(_primary_btn())
+        self._continue.setProperty("buttonRole", "primary")
         self._continue.setEnabled(False)
         self._continue.clicked.connect(self.submit)
         layout.addWidget(self._continue, alignment=Qt.AlignCenter)
@@ -99,11 +99,3 @@ def _h1() -> QFont:
     f.setPointSize(20)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 10px 18px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; color: #e0e7ff; }"
-    )

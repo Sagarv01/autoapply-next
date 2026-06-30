@@ -1,4 +1,4 @@
-"""Settings: the ALLOW_REAL_SUBMIT toggle (with a warning) + thresholds."""
+"""Settings: tester-only submission gate + thresholds."""
 
 from __future__ import annotations
 
@@ -16,13 +16,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..audience import Audience, current_audience
 from .settings_store import SettingsStore
 
 
 class SettingsScreen(QWidget):
-    def __init__(self, *, settings: SettingsStore):
+    def __init__(self, *, settings: SettingsStore, audience: Audience | None = None):
         super().__init__()
         self._settings = settings
+        self._audience = audience or current_audience()
+        if self._audience is Audience.USER and not self._settings.pace_between_applies:
+            self._settings.pace_between_applies = True
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -32,7 +36,8 @@ class SettingsScreen(QWidget):
         title.setFont(_h1())
         layout.addWidget(title)
 
-        layout.addWidget(self._build_safety_block())
+        if self._audience is Audience.TESTER:
+            layout.addWidget(self._build_safety_block())
         layout.addWidget(self._build_thresholds_block())
         layout.addStretch(1)
 
@@ -146,17 +151,14 @@ class SettingsScreen(QWidget):
         self._cap_spin.setValue(self._settings.daily_cap)
         self._cap_spin.setSuffix(" / day")
         self._cap_spin.setToolTip(
-            "Stored for future use. The current build runs one job at a time "
-            "interactively; the cap is not enforced anywhere yet."
+            "Maximum real submissions per day. AutoApply also has a hard 100/day ceiling."
         )
         self._cap_spin.valueChanged.connect(
             lambda v: setattr(self._settings, "daily_cap", v)
         )
         form.addRow("Daily application cap:", self._cap_spin)
 
-        self._pace_box = QCheckBox(
-            "Pace between applies (60-120s, recommended)"
-        )
+        self._pace_box = QCheckBox("Pace between applies (60-120s, recommended)")
         self._pace_box.setChecked(self._settings.pace_between_applies)
         self._pace_box.setToolTip(
             "On (default): the worker waits 60-120s between live "
@@ -167,13 +169,22 @@ class SettingsScreen(QWidget):
         self._pace_box.toggled.connect(
             lambda v: setattr(self._settings, "pace_between_applies", v)
         )
-        form.addRow("Throttle:", self._pace_box)
+        self._pace_label = QLabel("Throttle:")
+        form.addRow(self._pace_label, self._pace_box)
+        if self._audience is Audience.USER:
+            self._pace_label.hide()
+            self._pace_box.hide()
 
         note = QLabel(
-            "Threshold determines when a scraped job would be skipped at apply "
-            "time. The daily cap is stored but not yet enforced (informational "
-            "only). Throttle off means applies fire back-to-back; leave on "
-            "unless you know why you are turning it off."
+            "Threshold determines which scraped jobs AutoApply will apply to. "
+            "Daily cap limits real submissions across a day."
+            if self._audience is Audience.USER
+            else (
+                "Threshold determines when a scraped job would be skipped at apply "
+                "time. Daily cap limits live submissions across a day. Throttle off "
+                "means dry-run applies can run back-to-back; live submissions still "
+                "keep the 60s safety floor."
+            )
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #6b7280; font-size: 12px;")

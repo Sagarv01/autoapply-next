@@ -76,7 +76,7 @@ class SessionSetupScreen(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
 
         self._launch_btn = QPushButton("Open Seek to log in")
-        self._launch_btn.setStyleSheet(_primary_btn())
+        self._launch_btn.setProperty("buttonRole", "primary")
         self._launch_btn.clicked.connect(self._on_launch_clicked)
         row.addWidget(self._launch_btn)
 
@@ -217,11 +217,3 @@ def _h1() -> QFont:
     f.setPointSize(20)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 8px 16px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; }"
-    )

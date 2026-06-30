@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ..audience import Audience, current_audience
 from ..engine.scraping import ScrapeResult
 from ..engine.worker import EngineWorker
 from ..safe_ui import safe_slot, show_error_dialog
@@ -56,18 +57,20 @@ class QueueScreen(QWidget):
         engine_workdir: Path,
         worker: EngineWorker,
         settings: SettingsStore,
+        audience: Audience | None = None,
     ):
         super().__init__()
         self._engine_workdir = engine_workdir
         self._worker = worker
         self._settings = settings
+        self._audience = audience or current_audience()
         self._db_path = engine_workdir / "jobs.db"
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        title = QLabel("Queue")
+        title = QLabel("Job queue" if self._audience is Audience.USER else "Queue")
         title.setFont(_h1())
         layout.addWidget(title)
 
@@ -107,9 +110,11 @@ class QueueScreen(QWidget):
         self._keyword_input.returnPressed.connect(self._on_refresh_clicked)
         h.addWidget(self._keyword_input, stretch=1)
 
-        self._refresh_btn = QPushButton("Scrape and apply")
+        self._refresh_btn = QPushButton(
+            "Find and apply" if self._audience is Audience.USER else "Scrape and apply"
+        )
         self._refresh_btn.setMinimumWidth(180)
-        self._refresh_btn.setStyleSheet(_primary_btn())
+        self._refresh_btn.setProperty("buttonRole", "primary")
         self._refresh_btn.setToolTip(
             "Scrape Seek for the keyword, then automatically apply to "
             "every queued job at or above the threshold in score-desc "
@@ -169,6 +174,8 @@ class QueueScreen(QWidget):
         self._table.setColumnWidth(0, 64)
         self._table.setColumnWidth(3, 80)
         self._table.setColumnWidth(5, 110)
+        if self._audience is Audience.USER:
+            self._table.setColumnHidden(5, True)
         return self._table
 
     def _build_status_row(self) -> QWidget:
@@ -305,10 +312,12 @@ class QueueScreen(QWidget):
             url_item.setToolTip(row["url"] or "")
             self._table.setItem(i, 4, url_item)
 
-            run_btn = QPushButton("Run dry-run")
-            url = row["url"]
-            run_btn.clicked.connect(lambda _=False, u=url: self.run_requested.emit(u))
-            self._table.setCellWidget(i, 5, run_btn)
+            if self._audience is Audience.TESTER:
+                run_btn = QPushButton("Run dry-run")
+                run_btn.setProperty("buttonRole", "primary")
+                url = row["url"]
+                run_btn.clicked.connect(lambda _=False, u=url: self.run_requested.emit(u))
+                self._table.setCellWidget(i, 5, run_btn)
 
         if not rows:
             self._count_label.setText(
@@ -345,11 +354,3 @@ def _h1() -> QFont:
     f.setPointSize(20)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 8px 16px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; }"
-    )

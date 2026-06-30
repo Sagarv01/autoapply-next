@@ -21,17 +21,21 @@ VENDOR_ROOT = PROJECT_ROOT / "vendor" / "job-finder"
 # context, so __main__.py's relative imports would raise ImportError. The
 # launcher imports autoapply_next.__main__ by absolute name (see
 # packaging/autoapply_launch.py).
-ENTRY_SCRIPT = PROJECT_ROOT / "packaging" / "autoapply_launch.py"
+BUILD_AUDIENCE = (os.environ.get("AUTOAPPLY_BUILD_AUDIENCE") or "user").strip().lower()
+IS_TESTER_BUILD = BUILD_AUDIENCE in {"test", "tester", "beta", "internal", "dev"}
+ENTRY_SCRIPT = PROJECT_ROOT / "packaging" / (
+    "autoapply_tester_launch.py" if IS_TESTER_BUILD else "autoapply_launch.py"
+)
 RESOURCES_DIR = PROJECT_ROOT / "resources"
 
 IS_MACOS = sys.platform == "darwin"
 IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX = sys.platform.startswith("linux")
 
-APP_NAME = "AutoApply Next"
+APP_NAME = "AutoApply Tester" if IS_TESTER_BUILD else "AutoApply"
 # PyInstaller wants the EXE / COLLECT "name" to be a filename-safe token.
 # We keep spaces in the BUNDLE display name but strip them everywhere else.
-BIN_NAME = "AutoApplyNext"
+BIN_NAME = "AutoApplyTester" if IS_TESTER_BUILD else "AutoApply"
 
 # ---------------------------------------------------------------------------
 # Datas: ship the vendored engine tree as-is so its relative file references
@@ -220,12 +224,14 @@ if IS_MACOS:
         coll,
         name=f"{APP_NAME}.app",
         icon=icon_path,
-        bundle_identifier="com.autoapplynext.app",
+        bundle_identifier="com.autoapplynext.tester" if IS_TESTER_BUILD else "com.autoapply.app",
         version="0.1.0",
         info_plist={
             "CFBundleName": APP_NAME,
             "CFBundleDisplayName": APP_NAME,
-            "CFBundleIdentifier": "com.autoapplynext.app",
+            "CFBundleIdentifier": (
+                "com.autoapplynext.tester" if IS_TESTER_BUILD else "com.autoapply.app"
+            ),
             "CFBundleVersion": "0.1.0",
             "CFBundleShortVersionString": "0.1.0",
             "CFBundlePackageType": "APPL",

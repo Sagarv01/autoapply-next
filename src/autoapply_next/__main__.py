@@ -39,6 +39,7 @@ from .startup import (
     run_startup_recovery,
 )
 from .ui.main_window import MainWindow
+from .ui.theme import apply_app_theme
 
 
 def _configure_logging() -> None:
@@ -87,6 +88,7 @@ def main() -> int:
     QApplication.setAttribute(Qt.AA_DontUseNativeDialogs, False)
 
     app = QApplication(sys.argv)
+    apply_app_theme(app)
     # Install excepthook + Qt handler AFTER QApplication is constructed so
     # qInstallMessageHandler can hook the right context.
     install_global_handlers()

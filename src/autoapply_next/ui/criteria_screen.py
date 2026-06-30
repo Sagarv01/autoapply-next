@@ -101,7 +101,7 @@ class CriteriaScreen(QWidget):
         layout.addWidget(self._error)
 
         self._save_btn = QPushButton("Save and continue")
-        self._save_btn.setStyleSheet(_primary_btn())
+        self._save_btn.setProperty("buttonRole", "primary")
         self._save_btn.clicked.connect(self.submit_save)
         layout.addWidget(self._save_btn)
         layout.addStretch(1)
@@ -171,11 +171,3 @@ def _h1() -> QFont:
     f.setPointSize(20)
     f.setBold(True)
     return f
-
-
-def _primary_btn() -> str:
-    return (
-        "QPushButton { background: #1d4ed8; color: white; padding: 10px 16px; "
-        "border-radius: 6px; font-weight: bold; }"
-        "QPushButton:disabled { background: #93c5fd; color: #e0e7ff; }"
-    )

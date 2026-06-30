@@ -98,9 +98,7 @@ class ProfileScreen(QWidget):
         wrap.setLayout(row)
         row.addStretch(1)
         self._save_btn = QPushButton("Save profile")
-        self._save_btn.setStyleSheet(
-            "QPushButton { background: #1d4ed8; color: white; padding: 8px 16px; border-radius: 6px; }"
-        )
+        self._save_btn.setProperty("buttonRole", "primary")
         self._save_btn.clicked.connect(self._save)
         row.addWidget(self._save_btn)
         return wrap
