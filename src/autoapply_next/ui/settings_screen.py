@@ -144,7 +144,12 @@ class SettingsScreen(QWidget):
         self._threshold_spin.valueChanged.connect(
             lambda v: setattr(self._settings, "match_threshold", v)
         )
-        form.addRow("Match score threshold:", self._threshold_spin)
+        form.addRow(
+            "Minimum job match:"
+            if self._audience is Audience.USER
+            else "Match score threshold:",
+            self._threshold_spin,
+        )
 
         self._cap_spin = QSpinBox()
         self._cap_spin.setRange(0, 999)
@@ -176,8 +181,8 @@ class SettingsScreen(QWidget):
             self._pace_box.hide()
 
         note = QLabel(
-            "Threshold determines which scraped jobs AutoApply will apply to. "
-            "Daily cap limits real submissions across a day."
+            "The minimum match decides which jobs AutoApply applies to. "
+            "The daily cap limits how many it sends per day."
             if self._audience is Audience.USER
             else (
                 "Threshold determines when a scraped job would be skipped at apply "

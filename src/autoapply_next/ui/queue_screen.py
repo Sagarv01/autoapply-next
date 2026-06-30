@@ -115,13 +115,19 @@ class QueueScreen(QWidget):
         )
         self._refresh_btn.setMinimumWidth(180)
         self._refresh_btn.setProperty("buttonRole", "primary")
-        self._refresh_btn.setToolTip(
-            "Scrape Seek for the keyword, then automatically apply to "
-            "every queued job at or above the threshold in score-desc "
-            "order. LIVE if the Settings gate is on; dry-run otherwise. "
-            "Cap and pacing match job-finder (max 100 per run, "
-            "60-120s between jobs). STOP on the Batch screen."
-        )
+        if self._audience is Audience.USER:
+            self._refresh_btn.setToolTip(
+                "Search Seek for this keyword and apply to the best matches "
+                "for you. You can stop any time on the Applications screen."
+            )
+        else:
+            self._refresh_btn.setToolTip(
+                "Scrape Seek for the keyword, then automatically apply to "
+                "every queued job at or above the threshold in score-desc "
+                "order. LIVE if the Settings gate is on; dry-run otherwise. "
+                "Cap and pacing match job-finder (max 100 per run, "
+                "60-120s between jobs). STOP on the Batch screen."
+            )
         self._refresh_btn.clicked.connect(self._on_refresh_clicked)
         h.addWidget(self._refresh_btn)
 
@@ -142,13 +148,17 @@ class QueueScreen(QWidget):
         h.addWidget(self._only_queued)
 
         self._only_above_threshold = QCheckBox(
-            f"Only score >= threshold ({self._settings.match_threshold})"
+            f"Only strong matches ({self._settings.match_threshold}+)"
+            if self._audience is Audience.USER
+            else f"Only score >= threshold ({self._settings.match_threshold})"
         )
         self._only_above_threshold.setChecked(False)
         self._only_above_threshold.toggled.connect(self._refresh_table)
         self._settings.match_threshold_changed.connect(
             lambda v: self._only_above_threshold.setText(
-                f"Only score >= threshold ({v})"
+                f"Only strong matches ({v}+)"
+                if self._audience is Audience.USER
+                else f"Only score >= threshold ({v})"
             )
         )
         h.addWidget(self._only_above_threshold)
@@ -157,14 +167,19 @@ class QueueScreen(QWidget):
 
         self._reload_btn = QPushButton("Reload table")
         self._reload_btn.clicked.connect(self._refresh_table)
+        if self._audience is Audience.USER:
+            # Manual reload is a diagnostic convenience; the user view auto-refreshes.
+            self._reload_btn.hide()
         h.addWidget(self._reload_btn)
         return wrap
 
     def _build_table(self) -> QWidget:
         self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(
-            ["Score", "Title", "Company", "Status", "URL", ""]
-        )
+        if self._audience is Audience.USER:
+            headers = ["Fit", "Role", "Company", "Status", "URL", ""]
+        else:
+            headers = ["Score", "Title", "Company", "Status", "URL", ""]
+        self._table.setHorizontalHeaderLabels(headers)
         self._table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.Stretch
         )
@@ -175,6 +190,9 @@ class QueueScreen(QWidget):
         self._table.setColumnWidth(3, 80)
         self._table.setColumnWidth(5, 110)
         if self._audience is Audience.USER:
+            # End users see role/company/fit/status only; the raw URL and the
+            # tester-only per-row run button stay out of the simple view.
+            self._table.setColumnHidden(4, True)
             self._table.setColumnHidden(5, True)
         return self._table
 
@@ -198,20 +216,28 @@ class QueueScreen(QWidget):
     def _on_refresh_clicked(self) -> None:
         kw = self._keyword_input.text().strip()
         if not kw:
+            btn_name = (
+                "Find and apply" if self._audience is Audience.USER else "Scrape and apply"
+            )
             show_error_dialog(
                 self,
                 "Keyword needed",
                 "Type a search keyword (for example 'platform engineer') "
-                "before clicking Scrape and apply.",
+                f"before clicking {btn_name}.",
             )
             self._keyword_input.setFocus()
             return
         self._settings.last_scrape_keyword = kw
-        mode = "LIVE" if self._settings.allow_real_submit else "dry-run"
-        self._count_label.setText(
-            f"Clearing queue first ({mode}), then scraping '{kw}', "
-            "then applying new jobs..."
-        )
+        if self._audience is Audience.USER:
+            self._count_label.setText(
+                f"Searching for '{kw}' and applying to the best matches..."
+            )
+        else:
+            mode = "LIVE" if self._settings.allow_real_submit else "dry-run"
+            self._count_label.setText(
+                f"Clearing queue first ({mode}), then scraping '{kw}', "
+                "then applying new jobs..."
+            )
         # `pace_between_applies` is the user-facing kill-switch for the
         # 60-120s throttle. When OFF, send 0 to the worker so applies run
         # back-to-back. When ON, send the stored seconds value (the
@@ -239,17 +265,27 @@ class QueueScreen(QWidget):
     @Slot(object)
     def _on_scrape_finished(self, result: ScrapeResult) -> None:
         if result.errors:
-            self._count_label.setText(
-                f"Scraped {result.total_scraped}, {len(result.scored)} scored, "
-                f"{len(result.errors)} errors (see log)"
-            )
             for err in result.errors:
                 logger.warning("scrape error: %s", err)
+            if self._audience is Audience.USER:
+                self._count_label.setText(
+                    f"Found {result.total_scraped} jobs, {len(result.scored)} matched."
+                )
+            else:
+                self._count_label.setText(
+                    f"Scraped {result.total_scraped}, {len(result.scored)} scored, "
+                    f"{len(result.errors)} errors (see log)"
+                )
         else:
-            self._count_label.setText(
-                f"Scraped {result.total_scraped}, {len(result.scored)} scored. "
-                "Click 'Run dry-run' to start."
-            )
+            if self._audience is Audience.USER:
+                self._count_label.setText(
+                    f"Found {result.total_scraped} jobs, {len(result.scored)} matched."
+                )
+            else:
+                self._count_label.setText(
+                    f"Scraped {result.total_scraped}, {len(result.scored)} scored. "
+                    "Click 'Run dry-run' to start."
+                )
         self._refresh_table()
 
     @Slot(str)
@@ -278,7 +314,12 @@ class QueueScreen(QWidget):
     @Slot(str, str)
     def _on_worker_failed(self, op: str, msg: str) -> None:
         if op == "scrape":
-            self._count_label.setText(f"Scrape failed: {msg}")
+            if self._audience is Audience.USER:
+                self._count_label.setText(
+                    "Could not search Seek just now. Try again in a moment."
+                )
+            else:
+                self._count_label.setText(f"Scrape failed: {msg}")
 
     @Slot()
     def _refresh_table(self) -> None:

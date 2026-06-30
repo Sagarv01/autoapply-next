@@ -192,7 +192,7 @@ class MainWindow(QMainWindow):
             (self._profile, "Profile"),
             (self._queue, "Queue"),
             (self._run, "Run"),
-            (self._batch, "Batch"),
+            (self._batch, "Applications" if self._audience is Audience.USER else "Batch"),
             (self._results, "Results"),
             (self._held_screen, "Waiting on you"),
             (self._billing, "Upgrade"),
@@ -297,11 +297,24 @@ class MainWindow(QMainWindow):
 
     @Slot(str)
     def _on_worker_state(self, state: str) -> None:
-        self.statusBar().showMessage(f"Engine: {state}", 5000)
+        prefix = "" if self._audience is Audience.USER else "Engine: "
+        self.statusBar().showMessage(f"{prefix}{state}", 5000)
 
     @Slot(str, str)
     @safe_slot
     def _on_worker_failed(self, op: str, message: str) -> None:
+        if self._audience is Audience.USER:
+            # End users get a short recovery message; the technical op/message
+            # (and any traceback) stays in the logs for the tester build.
+            show_error_dialog(
+                self,
+                "Something went wrong",
+                (
+                    "That step did not finish. You can try again, or use the "
+                    "menu on the left to switch screens."
+                ),
+            )
+            return
         show_error_dialog(
             self,
             f"Engine error: {op}",

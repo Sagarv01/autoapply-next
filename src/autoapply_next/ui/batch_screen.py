@@ -334,6 +334,16 @@ class BatchScreen(QWidget):
     def _running_status(
         self, done: int, total: int, result: ApplicationResult
     ) -> str:
+        if self._audience is Audience.USER:
+            verb = {
+                ApplicationStatus.SUBMITTED: "sent",
+                ApplicationStatus.SUBMITTED_UNCERTAIN: "sent (check on Seek)",
+                ApplicationStatus.DRY_RUN_VERIFIED: "prepared",
+                ApplicationStatus.SKIPPED_LOW_SCORE: "skipped (low match)",
+                ApplicationStatus.FAILED: "could not finish",
+                ApplicationStatus.CANCELLED: "stopped",
+            }.get(result.status, "done")
+            return f"Applying: {done} of {total} (last: {verb})"
         verb = {
             ApplicationStatus.SUBMITTED: "submitted",
             ApplicationStatus.SUBMITTED_UNCERTAIN: "submitted (uncertain)",
@@ -349,20 +359,38 @@ class BatchScreen(QWidget):
     def _on_run_finished(self, tally: BatchRunResult) -> None:
         self._run_progress.setVisible(False)
         self._stop_btn.setEnabled(False)
-        readout = (
-            f"Batch {tally.stop_reason}. "
-            f"submitted {tally.submitted}, "
-            f"verified {tally.verified}, "
-            f"uncertain {tally.submitted_uncertain} (verify on Seek), "
-            f"failed {tally.failed}, "
-            f"dry-run-verified {tally.dry_run_verified}, "
-            f"skipped {tally.skipped_low_score}, "
-            f"cancelled {tally.cancelled}."
-        )
-        if tally.fatal_reason:
-            readout += f"\nFatal: {tally.fatal_reason}"
-        self._tally_label.setText(readout)
-        self._status_label.setText(f"Batch {tally.stop_reason}.")
+        if self._audience is Audience.USER:
+            parts: list[str] = []
+            if tally.submitted:
+                parts.append(f"{tally.submitted} sent")
+            if tally.dry_run_verified:
+                parts.append(f"{tally.dry_run_verified} prepared")
+            if tally.submitted_uncertain:
+                parts.append(f"{tally.submitted_uncertain} to check on Seek")
+            if tally.skipped_low_score:
+                parts.append(f"{tally.skipped_low_score} skipped (low match)")
+            if tally.failed:
+                parts.append(f"{tally.failed} could not finish")
+            readout = "Done. " + (
+                ", ".join(parts) if parts else "Nothing new to apply to right now."
+            ) + "."
+            self._tally_label.setText(readout)
+            self._status_label.setText("Done.")
+        else:
+            readout = (
+                f"Batch {tally.stop_reason}. "
+                f"submitted {tally.submitted}, "
+                f"verified {tally.verified}, "
+                f"uncertain {tally.submitted_uncertain} (verify on Seek), "
+                f"failed {tally.failed}, "
+                f"dry-run-verified {tally.dry_run_verified}, "
+                f"skipped {tally.skipped_low_score}, "
+                f"cancelled {tally.cancelled}."
+            )
+            if tally.fatal_reason:
+                readout += f"\nFatal: {tally.fatal_reason}"
+            self._tally_label.setText(readout)
+            self._status_label.setText(f"Batch {tally.stop_reason}.")
         if tally.fatal_reason:
             final = RunState.ERROR
         else:
@@ -377,7 +405,15 @@ class BatchScreen(QWidget):
     @safe_slot
     def _on_worker_failed(self, op: str, msg: str) -> None:
         if op.startswith("batch_") or op == "scrape_and_auto_apply":
-            show_error_dialog(self, f"Auto-apply error: {op}", msg)
+            if self._audience is Audience.USER:
+                show_error_dialog(
+                    self,
+                    "Applying stopped",
+                    "Something interrupted applying. You can start it again "
+                    "from the Job queue.",
+                )
+            else:
+                show_error_dialog(self, f"Auto-apply error: {op}", msg)
 
     @Slot(int, int, int, int)
     @safe_slot
