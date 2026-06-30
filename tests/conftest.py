@@ -37,6 +37,24 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_tailoring_policy():
+    """Isolate the process-global tailoring policy between tests.
+
+    `tailoring_policy._allowed` is module-level by design (it deliberately does
+    not thread through run_batch -> apply_to_job). A test that sets it False, or
+    a worker run that resolves a non-Pro tier, would otherwise leak that state
+    into a later test that assumes the default True, silently routing it through
+    the base-docs document path. Reset to the default before and after every
+    test so each starts from a known state.
+    """
+    from autoapply_next.engine import tailoring_policy
+
+    tailoring_policy.set_tailoring_allowed(None)
+    yield
+    tailoring_policy.set_tailoring_allowed(None)
+
+
 @pytest.fixture
 def engine_workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Stage a minimal engine workdir: copy a stub config.yaml and assets/
