@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 
 from ..audience import Audience, current_audience
 from ..engine.batch import BatchRunResult
+from ..engine.job_store import get_company_for_url, get_title_for_url
 from ..engine.results import ApplicationResult, ApplicationStatus
 from ..engine.worker import EngineWorker
 from ..safe_ui import safe_slot, show_error_dialog
@@ -522,32 +523,14 @@ class BatchScreen(QWidget):
     def _title_for(self, result: ApplicationResult) -> str:
         # apply_to_job's result does not currently carry title/company.
         # Read them from jobs.db lazily.
-        try:
-            import sqlite3
-            with sqlite3.connect(self._engine_workdir / "jobs.db") as conn:
-                row = conn.execute(
-                    "SELECT title FROM applications WHERE url = ?",
-                    (result.job_url,),
-                ).fetchone()
-                if row and row[0]:
-                    return row[0]
-        except Exception:
-            pass
+        title = get_title_for_url(self._engine_workdir / "jobs.db", result.job_url)
+        if title:
+            return title
         return result.job_url.rsplit("/", 1)[-1]
 
     def _company_for(self, result: ApplicationResult) -> str:
-        try:
-            import sqlite3
-            with sqlite3.connect(self._engine_workdir / "jobs.db") as conn:
-                row = conn.execute(
-                    "SELECT company FROM applications WHERE url = ?",
-                    (result.job_url,),
-                ).fetchone()
-                if row and row[0]:
-                    return row[0]
-        except Exception:
-            pass
-        return ""
+        company = get_company_for_url(self._engine_workdir / "jobs.db", result.job_url)
+        return company or ""
 
 
 # --------------------------------------------------------------------------- styles
