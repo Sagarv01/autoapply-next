@@ -39,6 +39,9 @@ dependencies = [
 
   # Logging
   "structlog>=24.1",
+
+  # Error tracking (crash/exception reporting only — no product analytics)
+  "posthog>=3.0,<8",
 ]
 
 [project.optional-dependencies]

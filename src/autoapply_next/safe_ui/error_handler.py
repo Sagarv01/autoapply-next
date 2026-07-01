@@ -42,6 +42,8 @@ from typing import Any, Callable
 from PySide6.QtCore import QObject, QTimer, QtMsgType, Signal, qInstallMessageHandler
 from PySide6.QtWidgets import QMessageBox, QWidget
 
+from ..telemetry import capture_exception
+
 logger = logging.getLogger(__name__)
 
 
@@ -219,6 +221,10 @@ def _excepthook(exc_type, exc_value, exc_tb) -> None:
         return
     tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
     logger.error("Uncaught exception: %s: %s\n%s", exc_type.__name__, exc_value, tb_str)
+    # Forward to PostHog error tracking (no-op if not configured). The event
+    # is queued for the SDK's background consumer and drained at process exit
+    # by the SDK's own atexit hook, so a crash on the main thread still ships.
+    capture_exception(exc_value)
     title = f"Unexpected error: {exc_type.__name__}"
     summary = str(exc_value) or exc_type.__name__
     get_bus().error.emit(title, f"{summary}\n\n{tb_str}")

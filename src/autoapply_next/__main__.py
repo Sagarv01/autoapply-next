@@ -30,6 +30,7 @@ from .platform.bootstrap import (
 from .platform.paths import engine_workdir, app_log_dir
 from .safe_logging.scrubber import install_global_scrubbing
 from .safe_ui import install_global_handlers
+from .telemetry import capture_exception, init_posthog
 from .startup import (
     CaffeinateManager,
     OrphanWatchdog,
@@ -65,6 +66,11 @@ def _configure_logging() -> None:
 def main() -> int:
     _configure_logging()
     log = logging.getLogger(__name__)
+
+    # Error tracking is strictly opt-in: init_posthog() is a no-op (one DEBUG
+    # line) when POSTHOG_API_KEY is not set, so the app runs normally without
+    # it. Initialised after logging so the debug/enable lines are visible.
+    init_posthog()
 
     workdir = Path(
         os.environ.get("AUTOAPPLY_NEXT_ENGINE_WORKDIR")
@@ -106,8 +112,11 @@ def main() -> int:
         run_startup_recovery(workdir)
     except Exception as exc:
         # Recovery is best-effort. A DB-write failure here must not block
-        # the GUI from starting; log and continue.
+        # the GUI from starting; log and continue. The exception is also
+        # forwarded to PostHog error tracking (no-op if not configured) so
+        # we learn about recurring recovery failures.
         log.warning("startup recovery failed: %s", exc)
+        capture_exception(exc)
 
     window = MainWindow(engine_workdir=workdir)
     window.show()
