@@ -11,7 +11,9 @@ from __future__ import annotations
 from autoapply_next.auth import supabase_auth as sa
 
 
-def test_embedded_default_is_a_publishable_key():
+def test_embedded_default_is_a_publishable_key(monkeypatch):
+    # The default key was removed from source; ensure a configured key is used.
+    monkeypatch.setenv("AUTOAPPLY_SUPABASE_PUBLISHABLE_KEY", "sb_publishable_testdefault")
     assert sa._publishable_key().startswith("sb_publishable_")
 
 

@@ -15,8 +15,10 @@ def _env_or_call(name: str, default: str) -> str:
 
 
 # Production defaults. Override via environment variables for staging/self-host.
+# The Supabase publishable key should NOT be hardcoded; it is loaded from
+# AUTOAPPLY_SUPABASE_PUBLISHABLE_KEY (legacy AUTOAPPLY_SUPABASE_ANON_KEY still
+# works during transition). Tests and production builds must set it.
 _DEFAULT_SUPABASE_URL = "https://ndkeryoqlvktzuzxubvb.supabase.co"
-_DEFAULT_PUBLISHABLE_KEY = "sb_publishable_de9WAIQZ9jYJOuWZSFGHrw_GydeitzH"
 _DEFAULT_PROXY_BASE_URL = "https://autoapply-proxy-799883391199.australia-southeast1.run.app"
 _DEFAULT_DOWNLOAD_URL = "https://autoapply.com.au/download"
 _DEFAULT_SEEK_LOGIN_URL = "https://au.seek.com/oauth/login"
@@ -28,11 +30,16 @@ def supabase_url() -> str:
 
 
 def supabase_publishable_key() -> str:
-    return (
+    key = (
         os.environ.get("AUTOAPPLY_SUPABASE_PUBLISHABLE_KEY")
         or os.environ.get("AUTOAPPLY_SUPABASE_ANON_KEY")
-        or _DEFAULT_PUBLISHABLE_KEY
     )
+    if not key:
+        raise RuntimeError(
+            "AUTOAPPLY_SUPABASE_PUBLISHABLE_KEY (or legacy "
+            "AUTOAPPLY_SUPABASE_ANON_KEY) must be set."
+        )
+    return key
 
 
 def proxy_base_url() -> str:
