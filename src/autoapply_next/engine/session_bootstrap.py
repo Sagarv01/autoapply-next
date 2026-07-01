@@ -28,12 +28,11 @@ from pathlib import Path
 from typing import Callable
 
 from .adapter import _engine_workdir
+from autoapply_next.config import seek_login_url, seek_verify_url
 
 logger = logging.getLogger(__name__)
 
 
-SEEK_LOGIN_URL = "https://au.seek.com/oauth/login"
-SEEK_VERIFY_URL = "https://au.seek.com/profile/me"
 LOGIN_POLL_INTERVAL = 2.0  # seconds; matches setup_sessions.py cadence
 LOGIN_MAX_WAIT_SECONDS = 600  # 10 minutes; we still bail if the user wanders
 VERIFY_TIMEOUT_MS = 20000
@@ -131,7 +130,7 @@ async def run_session_bootstrap(
                     page = await context.new_page()
                     try:
                         await page.goto(
-                            SEEK_LOGIN_URL,
+                            seek_login_url(),
                             wait_until="domcontentloaded",
                             timeout=20000,
                         )
@@ -221,7 +220,7 @@ async def run_session_bootstrap(
                     try:
                         page = await context.new_page()
                         await page.goto(
-                            SEEK_VERIFY_URL,
+                            seek_verify_url(),
                             wait_until="domcontentloaded",
                             timeout=VERIFY_TIMEOUT_MS,
                         )

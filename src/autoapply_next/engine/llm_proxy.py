@@ -19,6 +19,8 @@ from typing import Any, Callable
 
 import httpx
 
+from autoapply_next.config import proxy_base_url as _config_proxy_base_url
+
 # Mirrors the vendored claude_cli.DEFAULT_MODEL so call sites that pass
 # model=DEFAULT_MODEL keep working; the proxy allowlists this model.
 DEFAULT_MODEL = "claude-sonnet-4-6"
@@ -65,13 +67,9 @@ class KillSwitchError(ProxyError):
 
 # ── configuration ───────────────────────────────────────────────────────────
 def _proxy_base_url() -> str:
-    # Proxy runs on GCP Cloud Run (Sydney). api.autoapply.com.au will become the
-    # branded alias once the custom domain is mapped; until then we hit the
-    # run.app URL directly. Override with AUTOAPPLY_PROXY_URL for local/dev.
-    return (
-        os.environ.get("AUTOAPPLY_PROXY_URL")
-        or "https://autoapply-proxy-799883391199.australia-southeast1.run.app"
-    ).rstrip("/")
+    # Proxy runs on GCP Cloud Run (Sydney). The default is set in
+    # autoapply_next.config so it can be overridden via AUTOAPPLY_PROXY_URL.
+    return _config_proxy_base_url()
 
 
 def _client_version() -> str:

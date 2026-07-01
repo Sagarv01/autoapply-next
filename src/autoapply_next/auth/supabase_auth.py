@@ -8,33 +8,23 @@ user types them, we exchange for tokens, and only the refresh token is persisted
 """
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
-# The AutoApply Supabase project. The publishable key is safe to embed (it is the
-# client-facing key, like the old anon key). The legacy anon JWT is being
-# deprecated by Supabase, so we ship the modern opaque sb_publishable_ key.
-# Overridable via env for staging/self-host.
-_DEFAULT_SUPABASE_URL = "https://ndkeryoqlvktzuzxubvb.supabase.co"
-_DEFAULT_PUBLISHABLE_KEY = "sb_publishable_de9WAIQZ9jYJOuWZSFGHrw_GydeitzH"
+from autoapply_next.config import supabase_publishable_key, supabase_url
 
 
 def _supabase_url() -> str:
-    return (os.environ.get("AUTOAPPLY_SUPABASE_URL") or _DEFAULT_SUPABASE_URL).rstrip("/")
+    return supabase_url()
 
 
 def _publishable_key() -> str:
     """The GoTrue apikey: the modern publishable key, with the legacy anon env
     honored during the transition."""
-    return (
-        os.environ.get("AUTOAPPLY_SUPABASE_PUBLISHABLE_KEY")
-        or os.environ.get("AUTOAPPLY_SUPABASE_ANON_KEY")
-        or _DEFAULT_PUBLISHABLE_KEY
-    )
+    return supabase_publishable_key()
 
 
 class AuthError(RuntimeError):

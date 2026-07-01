@@ -8,8 +8,7 @@ forced to update, so a developer build is never locked out by a stale floor.
 """
 from __future__ import annotations
 
-# Where an out-of-date user is sent to get the latest build.
-DOWNLOAD_URL = "https://autoapply.com.au/download"
+from autoapply_next.config import download_url
 
 
 def _parse(v) -> tuple[int, ...] | None:

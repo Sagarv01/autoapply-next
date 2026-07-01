@@ -12,7 +12,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices, QFont
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
-from ..version_check import DOWNLOAD_URL
+from ..version_check import download_url
 
 
 def _open_external(url: str) -> None:
@@ -49,7 +49,7 @@ class UpdateRequiredScreen(QWidget):
         layout.addWidget(self._btn, alignment=Qt.AlignCenter)
 
     def download(self) -> None:
-        self._open_url(DOWNLOAD_URL)
+        self._open_url(download_url())
 
     def message_text(self) -> str:
         return self._message.text()
